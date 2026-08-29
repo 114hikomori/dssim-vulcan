@@ -219,7 +219,7 @@ impl<T> Downsample for ImgRef<'_, T> where T: Average4 + Copy + Sync + Send {
             let top = &top[0..half_width * 2];
             let bot = &bot[0..half_width * 2];
 
-            top.chunks_exact(2)
+            top.as_chunks::<2>().0.iter()
                 .zip(bot.chunks_exact(2))
                 .map(|(a, b)| Average4::average4(a[0], a[1], b[0], b[1]))
         }));
@@ -245,7 +245,7 @@ pub(crate) fn worst(input: ImgRef<'_, f32>) -> ImgVec<f32> {
         let top = &top[0..half_width * 2];
         let bot = &bot[0..half_width * 2];
 
-        top.chunks_exact(2).zip(bot.chunks_exact(2)).map(|(a,b)| {
+        top.as_chunks::<2>().0.iter().zip(bot.chunks_exact(2)).map(|(a,b)| {
             a[0].min(a[1]).min(b[0].min(b[1]))
         })
     }));
@@ -270,7 +270,7 @@ pub(crate) fn avgworst(input: ImgRef<'_, f32>) -> ImgVec<f32> {
         let top = &top[0..half_width * 2];
         let bot = &bot[0..half_width * 2];
 
-        top.chunks_exact(2)
+        top.as_chunks::<2>().0.iter()
             .zip(bot.chunks_exact(2))
             .map(|(a, b)| (a[0] + a[1] + b[0] + b[1]).mul_add(0.25, a[0].min(a[1]).min(b[0].min(b[1]))) * 0.5)
     }));
@@ -295,7 +295,7 @@ pub(crate) fn avg(input: ImgRef<'_, f32>) -> ImgVec<f32> {
         let top = &top[0..half_width * 2];
         let bot = &bot[0..half_width * 2];
 
-        top.chunks_exact(2).zip(bot.chunks_exact(2)).map(|(a,b)| {
+        top.as_chunks::<2>().0.iter().zip(bot.chunks_exact(2)).map(|(a,b)| {
             (a[0] + a[1] + b[0] + b[1]) * 0.25
         })
     }));

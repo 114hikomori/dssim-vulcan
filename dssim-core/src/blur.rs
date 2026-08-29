@@ -87,7 +87,7 @@ mod portable {
             if width >= 5 {
                 let inner_len = width - 4;
                 let r_m2 = &row[..inner_len];
-                let r_m1 = &row[1..1 + inner_len];
+                let r_m1 = &row[1..=inner_len];
                 let r_c  = &row[2..2 + inner_len];
                 let r_p1 = &row[3..3 + inner_len];
                 let r_p2 = &row[4..4 + inner_len];
@@ -255,12 +255,12 @@ mod portable {
             if width >= 5 {
                 let inner_len = width - 4;
                 let s1_m2 = &r1[..inner_len];
-                let s1_m1 = &r1[1..1 + inner_len];
+                let s1_m1 = &r1[1..=inner_len];
                 let s1_c  = &r1[2..2 + inner_len];
                 let s1_p1 = &r1[3..3 + inner_len];
                 let s1_p2 = &r1[4..4 + inner_len];
                 let s2_m2 = &r2[..inner_len];
-                let s2_m1 = &r2[1..1 + inner_len];
+                let s2_m1 = &r2[1..=inner_len];
                 let s2_c  = &r2[2..2 + inner_len];
                 let s2_p1 = &r2[3..3 + inner_len];
                 let s2_p2 = &r2[4..4 + inner_len];
@@ -386,7 +386,7 @@ fn blur_zero() {
     let src = vec![0.25];
     let mut src2 = src.clone();
 
-    let mut tmp = vec![MaybeUninit::uninit(); 1];
+    let mut tmp = [MaybeUninit::uninit(); 1];
     let dst = blur(ImgRef::new(&src[..], 1, 1), &mut tmp[..]);
     blur_in_place(ImgRefMut::new(&mut src2[..], 1, 1), &mut tmp[..]);
 
@@ -422,7 +422,7 @@ fn blur_one_compare(src: ImgVec<f32>) {
     use std::mem::MaybeUninit;
     let mut src2 = src.clone();
 
-    let mut tmp = vec![MaybeUninit::uninit(); 5 * 5];
+    let mut tmp = [MaybeUninit::uninit(); 5 * 5];
     let dst = blur(src.as_ref(), &mut tmp[..]);
     blur_in_place(src2.as_mut(), &mut tmp[..]);
 
@@ -439,7 +439,7 @@ fn blur_1x1() {
     let src = vec![1.];
     let mut src2 = src.clone();
 
-    let mut tmp = vec![MaybeUninit::uninit(); 1];
+    let mut tmp = [MaybeUninit::uninit(); 1];
     let dst = blur(ImgRef::new(&src[..], 1, 1), &mut tmp[..]);
     blur_in_place(ImgRefMut::new(&mut src2[..], 1, 1), &mut tmp[..]);
 
@@ -462,7 +462,7 @@ fn blur_two() {
     ];
     let mut src2 = src.clone();
 
-    let mut tmp = vec![MaybeUninit::uninit(); 4 * 4];
+    let mut tmp = [MaybeUninit::uninit(); 4 * 4];
     let dst = blur(ImgRef::new(&src[..], 4, 4), &mut tmp[..]);
     blur_in_place(ImgRefMut::new(&mut src2[..], 4, 4), &mut tmp[..]);
 

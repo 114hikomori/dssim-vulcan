@@ -54,7 +54,7 @@
         legacy_do_blur(&pass1, w, h, w)
     }
 
-    /// Compute (interior_max_abs_err, boundary_max_abs_err, mean_abs_err)
+    /// Compute (`interior_max_abs_err`, `boundary_max_abs_err`, `mean_abs_err`)
     /// between this branch's blur and the legacy double-3×3 blur. "Interior"
     /// is anywhere ≥ 4 pixels from any edge.
     fn compare(src: &ImgVec<f32>) -> (f64, f64, f64) {
