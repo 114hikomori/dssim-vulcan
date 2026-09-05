@@ -29,6 +29,13 @@ You can save an image visualising the difference between the files:
 
     dssim -o difference.png file.png file-modified.png
 
+There is an experimental Vulkan compute backend. It gives the same scores
+within a small floating-point tolerance (≤0.000005), but requires a Vulkan
+driver and ignores `-o` for now. It falls back to the CPU automatically when
+Vulkan is unavailable:
+
+    dssim --gpu file.png file-modified.png
+
 It's also usable [as a library](https://docs.rs/dssim).
 
 Please be mindful about color profiles in the images. Different profiles, or lack of support for profiles in other tools, can make images appear different even when the pixels are the same.
