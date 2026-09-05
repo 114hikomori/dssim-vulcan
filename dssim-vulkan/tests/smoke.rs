@@ -3,12 +3,20 @@
 //! element is exactly doubled. Exit observation: passes on a real GPU (and
 //! lavapipe in CI) with validation layers clean.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use dssim_vulkan::{run_smoke, Context};
 
+/// One GPU test at a time — driver-timeout (TDR) caution, see blur_parity.rs.
+static GPU_LOCK: Mutex<()> = Mutex::new(());
+
+fn gpu_lock() -> MutexGuard<'static, ()> {
+    GPU_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 #[test]
 fn smoke_doubles_on_gpu() {
+    let _gpu = gpu_lock();
     let _ = env_logger::try_init();
 
     let context = Arc::new(Context::new().expect("Vulkan context"));
@@ -47,6 +55,7 @@ fn smoke_doubles_on_gpu() {
 
 #[test]
 fn context_lists_devices() {
+    let _gpu = gpu_lock();
     let context = Context::new().expect("Vulkan context");
     assert!(!context.device_candidates.is_empty());
     // Selection policy: the chosen device must be the best-ranked candidate.
@@ -57,6 +66,7 @@ fn context_lists_devices() {
 /// here) so both real-GPU drivers are exercised, not just the default pick.
 #[test]
 fn smoke_on_every_device() {
+    let _gpu = gpu_lock();
     let _ = env_logger::try_init();
 
     let probe = Context::new().expect("Vulkan context");

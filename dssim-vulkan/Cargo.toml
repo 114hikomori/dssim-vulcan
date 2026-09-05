@@ -9,6 +9,7 @@ description = "Experimental Vulkan compute backend for DSSIM (parity port of dss
 ash = "0.38.0"
 gpu-allocator = { version = "0.28.0", default-features = false, features = ["vulkan", "std"] }
 dssim-core = { path = "../dssim-core", features = ["gpu-reference"] }
+imgref = "1.12.3"
 
 [dev-dependencies]
 env_logger = "0.11"

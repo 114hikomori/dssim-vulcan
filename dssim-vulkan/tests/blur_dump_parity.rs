@@ -10,7 +10,7 @@
 //! the alpha pair (premultiply + dither path).
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use dssim_core::dumps::{self, Dump};
 use dssim_core::{new, ToRGBAPLU};
@@ -24,8 +24,16 @@ fn decode_rgba(path: &str) -> imgref::ImgVec<dssim_core::RGBAPLU> {
     Img::new(file.buffer.to_rgbaplu(), file.width, file.height)
 }
 
+/// One GPU test at a time — driver-timeout (TDR) caution, see blur_parity.rs.
+static GPU_LOCK: Mutex<()> = Mutex::new(());
+
+fn gpu_lock() -> MutexGuard<'static, ()> {
+    GPU_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 #[test]
 fn gpu_blur_matches_cpu_dumps() {
+    let _gpu = gpu_lock();
     let _ = env_logger::try_init();
 
     let dir = std::env::temp_dir().join(format!("dssim-blur-dumps-{}", std::process::id()));

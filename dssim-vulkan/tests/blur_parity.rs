@@ -6,9 +6,19 @@
 //! ≤ 2×10⁻⁶ max abs per pixel (CPU-equiv drift is ≤5.6×10⁻⁷).
 
 use dssim_vulkan::{blur_gpu, blur_mul_gpu, Context};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 const TOL: f64 = 2e-6;
+
+/// One GPU test at a time: concurrent dispatch streams from parallel test
+/// threads sustained enough load to trip the Windows driver timeout (TDR)
+/// on this machine (AMD Bug Report: "driver timeout has occurred"). The lock
+/// does not weaken any assertion — it only serializes dispatches.
+static GPU_LOCK: Mutex<()> = Mutex::new(());
+
+fn gpu_lock() -> MutexGuard<'static, ()> {
+    GPU_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 fn xorshift32(state: &mut u32) -> u32 {
     *state ^= *state << 13;
@@ -82,24 +92,28 @@ fn assert_parity(name: &str, cpu: &[f32], gpu: &[f32]) {
 }
 
 /// One context per enumerated device: the parity battery must hold on every
-/// real GPU, not just the best-ranked one (M2 audit fix).
-fn all_devices() -> Vec<(usize, Arc<Context>)> {
+/// real GPU, not just the best-ranked one (M2 audit fix). The GPU lock is
+/// held for the caller's whole test to keep dispatches serial.
+fn all_devices() -> (MutexGuard<'static, ()>, Vec<(usize, Arc<Context>)>) {
     let _ = env_logger::try_init();
+    let gpu = gpu_lock();
     let probe = Context::new().expect("Vulkan context");
     let candidates = probe.device_candidates.clone();
     drop(probe);
-    (0..candidates.len())
+    let devices = (0..candidates.len())
         .map(|i| {
             let ctx = Arc::new(Context::new_with_device(i).expect("pinned context"));
             eprintln!("device {i}: {}", ctx.device_name());
             (i, ctx)
         })
-        .collect()
+        .collect();
+    (gpu, devices)
 }
 
 #[test]
 fn gpu_blur_constant() {
-    for (idx, context) in all_devices() {
+    let (_gpu, devices) = all_devices();
+    for (idx, context) in devices {
         let cpu_img = vec![0.5f32; 64 * 48];
         let gpu = blur_gpu(&context, &cpu_img, 64, 48, 64).unwrap();
         assert_parity(&format!("constant_50[d{idx}]"), &cpu_blur(&cpu_img, 64, 48), &gpu);
@@ -108,7 +122,8 @@ fn gpu_blur_constant() {
 
 #[test]
 fn gpu_blur_linear_gradient() {
-    for (idx, context) in all_devices() {
+    let (_gpu, devices) = all_devices();
+    for (idx, context) in devices {
         let img = linear_gradient(96, 64);
         let gpu = blur_gpu(&context, &img, 96, 64, 96).unwrap();
         assert_parity(&format!("linear_gradient[d{idx}]"), &cpu_blur(&img, 96, 64), &gpu);
@@ -117,7 +132,8 @@ fn gpu_blur_linear_gradient() {
 
 #[test]
 fn gpu_blur_random() {
-    for (idx, context) in all_devices() {
+    let (_gpu, devices) = all_devices();
+    for (idx, context) in devices {
         for &(w, h, seed) in &[
             (64usize, 64usize, 0xCAFEBABE_u32),
             (97, 53, 0x1234_5678),
@@ -132,7 +148,8 @@ fn gpu_blur_random() {
 
 #[test]
 fn gpu_blur_step_edge() {
-    for (idx, context) in all_devices() {
+    let (_gpu, devices) = all_devices();
+    for (idx, context) in devices {
         let img = step_edge(96, 96);
         let gpu = blur_gpu(&context, &img, 96, 96, 96).unwrap();
         assert_parity(&format!("step_edge[d{idx}]"), &cpu_blur(&img, 96, 96), &gpu);
@@ -141,7 +158,8 @@ fn gpu_blur_step_edge() {
 
 #[test]
 fn gpu_blur_impulse() {
-    for (idx, context) in all_devices() {
+    let (_gpu, devices) = all_devices();
+    for (idx, context) in devices {
         for &(w, h) in &[(64usize, 64usize), (33, 37)] {
             let img = impulse(w, h);
             let gpu = blur_gpu(&context, &img, w, h, w).unwrap();
@@ -152,7 +170,8 @@ fn gpu_blur_impulse() {
 
 #[test]
 fn gpu_blur_strided_subimage() {
-    for (idx, context) in all_devices() {
+    let (_gpu, devices) = all_devices();
+    for (idx, context) in devices {
         // 96×64 buffer with 96 stride, viewing inner 80×48 — the sub-image
         // shape from the CPU equiv battery. Strided input must match the CPU
         // blur of the same strided view.
@@ -175,7 +194,8 @@ fn gpu_blur_strided_subimage() {
 
 #[test]
 fn gpu_blur_tiny_sizes() {
-    for (idx, context) in all_devices() {
+    let (_gpu, devices) = all_devices();
+    for (idx, context) in devices {
         for w in 1..=8usize {
             for h in 1..=8usize {
                 let img = random_image(w, h, 0xBEEF_F00Du32.wrapping_add((w * 99 + h) as u32));
@@ -188,7 +208,8 @@ fn gpu_blur_tiny_sizes() {
 
 #[test]
 fn gpu_blur_mul_parity() {
-    for (idx, context) in all_devices() {
+    let (_gpu, devices) = all_devices();
+    for (idx, context) in devices {
         for &(w, h) in &[(64usize, 48usize), (5, 7), (2, 3), (1, 1)] {
             let a = random_image(w, h, 0x0DD_BA5E);
             let b = random_image(w, h, 0xF00D_5EED);
@@ -200,7 +221,8 @@ fn gpu_blur_mul_parity() {
 
 #[test]
 fn gpu_blur_mul_strided_parity() {
-    for (idx, context) in all_devices() {
+    let (_gpu, devices) = all_devices();
+    for (idx, context) in devices {
         let (w, h) = (37usize, 21usize);
         let stride1 = w + 5;
         let stride2 = w + 11;
@@ -216,3 +238,4 @@ fn gpu_blur_mul_strided_parity() {
         assert_parity(&format!("blur_mul_strided[d{idx}]"), &cpu, &gpu);
     }
 }
+

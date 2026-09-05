@@ -9,13 +9,15 @@ pub mod blur;
 pub mod context;
 pub mod error;
 pub mod pipeline;
+pub mod score;
 pub mod ssim;
 pub mod transfer;
 
-pub use blur::{blur_gpu, blur_mul_gpu};
+pub use blur::{blur_gpu, blur_mul_gpu, BlurPipelines};
 pub use context::Context;
 pub use error::{Error, Result};
 pub use pipeline::ComputePipeline;
+pub use score::{to_dssim, GpuSsim, GpuSsimImage};
 pub use ssim::ssim_combine_gpu;
 pub use transfer::Buffer;
 

@@ -54,42 +54,60 @@ fn upload(context: &Arc<Context>, name: &str, data: &[f32]) -> Result<Buffer> {
     context.upload_buffer(name, &pack(data), vk::BufferUsageFlags::STORAGE_BUFFER)
 }
 
-/// GPU SSIM combine over blurred statistics.
+/// The two SSIM combine pipelines (3-channel and 1-channel), created once
+/// per [`GpuSsim`](crate::GpuSsim) and reused for every scale.
+pub struct SsimPipelines {
+    context: Arc<Context>,
+    combine3: ComputePipeline,
+    combine1: ComputePipeline,
+}
+
+impl SsimPipelines {
+    pub fn new(context: &Arc<Context>) -> Result<Self> {
+        Ok(Self {
+            context: context.clone(),
+            combine3: ComputePipeline::new(context, "ssim_combine_3ch", include_spv("ssim_combine_3ch"), 6, 48)?,
+            combine1: ComputePipeline::new(context, "ssim_combine_1ch", include_spv("ssim_combine_1ch"), 6, 48)?,
+        })
+    }
+}
+
+/// GPU SSIM combine over blurred statistics, via prebuilt pipelines.
 ///
-/// `mu` and `sq_blur` hold `2 * num_channels` concatenated planes —
-/// (original, modified) per channel, plane stride = width; `cross` holds
-/// `num_channels` planes. Channel order matches `to_lab()` (L, a, b).
+/// `mu_o`/`mu_m` hold `num_channels` concatenated planes each (original /
+/// modified), likewise `sq_o`/`sq_m`; `cross` holds `num_channels` planes.
+/// Plane stride = width, channel order matches `to_lab()` (L, a, b).
 ///
 /// * `num_channels == 3` mirrors `compare_scale_3ch` (color inputs).
 /// * `num_channels == 1` mirrors `compare_scale` (gray inputs).
 ///
 /// Returns the tightly packed `width × height` SSIM map.
-pub fn ssim_combine_gpu(
-    context: &Arc<Context>,
-    mu: &[f32],
-    sq_blur: &[f32],
+#[allow(clippy::too_many_arguments)]
+pub fn ssim_combine_pipelines(
+    pipelines: &SsimPipelines,
+    mu_o: &[f32],
+    sq_o: &[f32],
+    mu_m: &[f32],
+    sq_m: &[f32],
     cross: &[f32],
     width: usize,
     height: usize,
     num_channels: usize,
 ) -> Result<Vec<f32>> {
     assert!(num_channels == 1 || num_channels == 3, "DSSIM uses 1 or 3 channels");
-    assert_eq!(mu.len(), 2 * num_channels * width * height);
-    assert_eq!(sq_blur.len(), 2 * num_channels * width * height);
-    assert_eq!(cross.len(), num_channels * width * height);
-
     let pixels = width * height;
-    let shader = match num_channels {
-        3 => include_spv("ssim_combine_3ch"),
-        _ => include_spv("ssim_combine_1ch"),
-    };
-    let pipeline = ComputePipeline::new(context, "ssim_combine", shader, 6, 48)?;
+    assert_eq!(mu_o.len(), num_channels * pixels);
+    assert_eq!(mu_m.len(), num_channels * pixels);
+    assert_eq!(sq_o.len(), num_channels * pixels);
+    assert_eq!(sq_m.len(), num_channels * pixels);
+    assert_eq!(cross.len(), num_channels * pixels);
 
-    // Both shaders take the same six bindings: (mu_o, mu_m, sq_o, sq_m,
-    // cross, dst). For 3ch the first four arrive as 3-plane concatenations;
-    // for 1ch each is a single plane.
-    let (mu_o, mu_m) = mu.split_at(pixels * num_channels);
-    let (sq_o, sq_m) = sq_blur.split_at(pixels * num_channels);
+    let context = &pipelines.context;
+    let pipeline = match num_channels {
+        3 => &pipelines.combine3,
+        _ => &pipelines.combine1,
+    };
+
     let mu_o_buf = upload(context, "ssim.mu_o", mu_o)?;
     let mu_m_buf = upload(context, "ssim.mu_m", mu_m)?;
     let sq_o_buf = upload(context, "ssim.sq_o", sq_o)?;
@@ -103,7 +121,7 @@ pub fn ssim_combine_gpu(
     )?;
 
     let pass = Pass {
-        pipeline: &pipeline,
+        pipeline,
         buffers: vec![&mu_o_buf, &mu_m_buf, &sq_o_buf, &sq_m_buf, &cross_buf, &dst],
         push: pc_bytes(width, height),
         groups: (pixels as u32).div_ceil(64),
@@ -116,4 +134,25 @@ pub fn ssim_combine_gpu(
         out.push(f32::from_le_bytes(*c));
     }
     Ok(out)
+}
+
+/// Convenience wrapper over [`ssim_combine_pipelines`]: `mu` and `sq_blur`
+/// hold `2 * num_channels` concatenated planes — (original, modified) per
+/// channel, plane stride = width; `cross` holds `num_channels` planes.
+pub fn ssim_combine_gpu(
+    context: &Arc<Context>,
+    mu: &[f32],
+    sq_blur: &[f32],
+    cross: &[f32],
+    width: usize,
+    height: usize,
+    num_channels: usize,
+) -> Result<Vec<f32>> {
+    let pipelines = SsimPipelines::new(context)?;
+    let pixels = width * height;
+    let (mu_o, mu_m) = mu.split_at(pixels * num_channels);
+    let (sq_o, sq_m) = sq_blur.split_at(pixels * num_channels);
+    ssim_combine_pipelines(
+        &pipelines, mu_o, sq_o, mu_m, sq_m, cross, width, height, num_channels,
+    )
 }
