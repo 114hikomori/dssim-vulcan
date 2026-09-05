@@ -160,3 +160,34 @@ Milestone ids refer to `dssim-vulkan-fable-plan.md` §16 (also listed in `AGENTS
   load-bearing. Do not "restore" OpFma.
 - Blocked / open question: none.
 - Next: unchanged — Phase E (multi-scale GPU pipeline, headline score parity).
+
+## 2026-09-05 — M4 (Phase E)
+
+- Done: Phase E complete (commit `547e2f3`). `GpuSsim` orchestrates the exact CPU
+  pipeline order per scale — CPU Lab conversion (hybrid; Phase F moves color), GPU
+  statistics (chroma pre-blur, mu, sq_blur; cross = blur_mul of preprocessed planes),
+  GPU SSIM map, CPU f64 pooling (`score.rs`: DEFAULT_WEIGHTS / power term / MAD /
+  to_dssim transcribed, pinned by locked-value tests; extraction from dssim-core
+  declined to avoid restructuring the AGPL production path) — then CPU 2×2 downsample
+  via dssim-core's Downsample. Pipelines built once per GpuSsim and reused. Exit
+  observation met on BOTH GPUs: locked full-pipeline score 0.0009483923725199794 hit
+  with diff 4.555e-8 (RX 6600M) / 4.702e-9 (integrated); both sub-image locked values
+  within bound; identity == 0.0 exactly; vs live CPU path: full 4.6e-8, alpha 7.9e-8,
+  gray(1ch) 1.671e-6 (all ≤ 5e-6). Workspace green (single run); clippy clean.
+- Deviated from plan: pooling duplicated instead of extracted (rationale above);
+  GPU downsample deferred (plan allows: hybrid keeps scale-gen CPU; GPU box-downsample
+  returns as profiling-justified work). Sub-image inputs materialized tight before
+  create_image (pixel-equivalent; ImgRef has Output≠Self).
+- INCIDENT (user-reported): AMD Bug Report popup — "driver timeout has occurred"
+  (Windows TDR). Cause: my repeated parallel GPU stress runs (5 test binaries
+  concurrently × parallel threads × both GPUs). ERROR_DEVICE_LOST flake in run 2 was
+  the driver reset, not an arithmetic bug. Both GPUs Status OK afterwards; no orphan
+  processes. Policy now in effect: every dssim-vulkan test binary holds a GPU_LOCK so
+  only one test dispatches at a time; verification is single-run per change, no stress
+  loops; run test binaries serially on this machine.
+- Blocked / open question: none.
+- Next: Phase F — GPU color conversion (RGBA8 sRGB → LUT linearize → premultiply →
+  Lab on GPU: 256-entry LUT from to_linear, alpha dither n=(x+11)^(y+11) bits 16/8/32,
+  D65 matrix, cbrt_poly + 2×Halley, ×1.05 / 86.2/220 / 107.9/220 fudges; parity vs CPU
+  Lab dumps ≤ 1e-6) (`dssim-vulkan-fable-plan.md` §6 Phase F / VULKAN_PORT_PLAN §4
+  Phase 2).
