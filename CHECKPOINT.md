@@ -114,3 +114,30 @@ Milestone ids refer to `dssim-vulkan-fable-plan.md` §16 (also listed in `AGENTS
   (dssim.rs create_image loop and compare_inner).
 - Blocked / open question: none.
 - Next: unchanged — Phase D (single-scale GPU SSIM).
+
+## 2026-09-05 — M3 (Phase D)
+
+- Done: Phase D complete (commit `ffd881a`). GPU SSIM combine shaders (3ch + 1ch) are
+  exact transcriptions of dssim.rs compare_scale_3ch / compare_scale: fma() at the two
+  designated sites, inv3 multiply, CPU association order enforced with GLSL `precise`
+  (SPIR-V NoContraction). Exit observation met on BOTH GPUs: 28 scale-maps across all
+  scenarios (full, identity, gray 1ch, alpha, both sub-image crops) at max abs 1.192e-7
+  vs the 2e-6 bound; CPU-pooled single-scale scores within 3.501e-8 of the dumps
+  (5e-6 bound); identity maps exactly 1.0 everywhere (the mathematical-fact check).
+  Workspace green; clippy clean on touched files.
+- Deviated from plan: none material. Two GPU-specific precision findings, both fixed and
+  documented in the shaders: (1) without `precise`, glslc contracts x - mu*mu into
+  fma(-mu, mu, x); sigma cancellation amplifies that one extra rounding to 1.9e-5 —
+  diagnosed by scalar-Rust recomputation of pixel 0 from dumped inputs (bitwise-matched
+  CPU, isolating the GPU arithmetic); (2) Vulkan FDiv is only 2.5-ulp-accurate, so
+  numerator==denominator selects exactly 1.0 (restores CPU's correctly-rounded division
+  for the identity case; other pixels keep ≤2.5 ulp, absorbed by the 2e-6 bound).
+  Also: compare() processes one scale fewer than create_image generates (scale_weights
+  zip) — scale probes in dump tests now use ssim dumps.
+- Blocked / open question: none.
+- Next: Phase E — multi-scale pipeline: run the whole pyramid on GPU (downsample_box2 +
+  rgba→Lab stays CPU per hybrid strategy? No — plan §6 Phase E moves scale generation to
+  GPU only after single-scale correctness: orchestrate per-scale Lab (CPU) → blur/SSIM
+  (GPU) end to end, then weighted pooling f64 on CPU; headline: full-pipeline score
+  parity vs ssim_locked_values within 5e-6 (`dssim-vulkan-fable-plan.md` §6 Phase E /
+  VULKAN_PORT_PLAN.md §4 Phase 5).
