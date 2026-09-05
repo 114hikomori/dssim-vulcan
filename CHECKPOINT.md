@@ -41,3 +41,30 @@ Milestone ids refer to `dssim-vulkan-fable-plan.md` §16 (also listed in `AGENTS
   pool/buffer, sync, staging upload/download, `noop.comp` (×2 smoke shader) passing on
   lavapipe + one real GPU with validation clean (`dssim-vulkan-fable-plan.md` §6 Phase B /
   VULKAN_PORT_PLAN.md §4 Phase 1). M1 exit: smoke test green on lavapipe + real GPU.
+
+## 2026-09-05 — M1 (real-GPU leg)
+
+- Done: Phase B complete (commit `9d7afe6`). New workspace crate `dssim-vulkan`
+  (ash 0.38 + gpu-allocator 0.28): instance, validation layers (dev builds — observed
+  active: caught a missing push-constant push and a memory-leak/DLL-unload teardown bug),
+  device selection discrete > integrated (candidates listed), compute queue + one-shot
+  fence-wait submits, gpu-allocator-backed buffers, staging upload/readback download,
+  storage-buffer descriptor layout + push constants, debug naming. Smoke shader
+  `×2` (shaders/smoke_double.comp → checked-in .spv blob) verified element-exact
+  (incl. f32 extremes) on BOTH enumerated real GPUs: AMD Radeon RX 6600M (discrete) and
+  AMD Radeon integrated Graphics; validation clean afterwards; 5 consecutive parallel
+  test runs green; workspace `cargo test` green; clippy clean. Context creation is
+  serialized in-process — the AMD Windows driver returned INCOMPLETE when two threads
+  created instances concurrently (test startup race).
+- Deviated from plan: (1) `.spv` blobs checked in and compiled via the SDK's glslc
+  instead of a shaderc build.rs — shaderc's C++ build is heavy; revisit build.rs when
+  Phase C grows the shader set. (2) lavapipe leg of M1 not run — Mesa lvp unavailable on
+  this Windows host and CI config changes are out of scope; deferred to Phase G's CI job
+  (the smoke test is the exact payload for it). (3) Dependencies follow the plan (ash,
+  gpu-allocator); provenance: no dssim-core code reused in this crate — all new
+  implementation (license note: crate is AGPL-3.0).
+- Blocked / open question: none.
+- Next: Phase C — first GPU kernel: the blur (H5/V5, fused product+blur, in-place chroma
+  blur semantics, four boundary cases with exact K5_EDGE_* constants, tiny sizes 1..=8),
+  tested against dssim-core's blur + equiv_tests battery, compared against M0's blur
+  dumps (`dssim-vulkan-fable-plan.md` §6 Phase C / VULKAN_PORT_PLAN.md §4 Phase 3).
