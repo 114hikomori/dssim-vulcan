@@ -218,3 +218,28 @@ Milestone ids refer to `dssim-vulkan-fable-plan.md` §16 (also listed in `AGENTS
   regression, benchmark harness, docs (`dssim-vulkan-fable-plan.md` §6 Phase G /
   VULKAN_PORT_PLAN §4 Phase 6). CI config changes require explicit user approval
   (AGENTS.md §8).
+
+## 2026-09-05 — M6 (Phase G, CLI portion)
+
+- Done: CLI integration shipped (commit `8608e8d`). `dssim --gpu` runs the full
+  GPU hybrid pipeline (decode/profiles/linearize/premultiply/downsample on CPU —
+  Lab/stats/SSIM/score on GPU); automatic CPU fallback prints a note when no Vulkan
+  device exists; the default CPU path is untouched; `-o` map writing warns+ignores on
+  GPU (maps are a Phase-H TODO). README documents usage + limitations. Verified
+  (single run per TDR policy): gpu_cli.rs golden test — CPU vs --gpu stdout parses in
+  `{dssim:.8}\t{file}` format with values within 5e-6 (observed 1.700e-7);
+  size-mismatch failure parity; workspace green; clippy clean; both
+  `--features gpu` (default) and `--no-default-features` (CPU-only) compile.
+- Deviated from plan: (1) "byte-identical stdout" from the plan is NOT achievable —
+  GPU FP drift (~1e-7) shows in the 8th decimal; the golden test asserts identical
+  FORMAT + values <=5e-6 (plan P5's own tolerance). Honest reformulation, not a
+  weakened check: the old claim was physically impossible. (2) ICC profiles are
+  skipped on the GPU decode path (load_image_rgba) — documented; profile-bearing
+  fixtures may differ from the CPU path's decode (the CPU path keeps full profile
+  handling). (3) CI/lavapipe job, benchmark harness, backend selection UI, real-GPU
+  nightly matrix: NOT started — CI config changes need explicit user approval
+  (AGENTS.md §8); benchmark harness is Phase H territory (VULKAN_PORT_PLAN Phase 7).
+- Blocked / open question: none. PENDING (user decision): CI/lavapipe job authorship.
+- Next: Phase H — performance & robustness (VULKAN_PORT_PLAN §4 Phase 7): profile
+  vs CPU baseline first, then opt-in GPU downsampling/LUT, batch mode, async
+  readback. Performance numbers must be measured before any claim.
