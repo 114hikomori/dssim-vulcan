@@ -1,0 +1,13 @@
+[package]
+name = "dssim-vulkan"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0"
+description = "Experimental Vulkan compute backend for DSSIM (parity port of dssim-core kernels)"
+
+[dependencies]
+ash = "0.38.0"
+gpu-allocator = { version = "0.28.0", default-features = false, features = ["vulkan", "std"] }
+
+[dev-dependencies]
+env_logger = "0.11"

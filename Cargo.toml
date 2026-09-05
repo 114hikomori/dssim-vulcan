@@ -55,7 +55,8 @@ rustdoc-args = ["--generate-link-to-definition"]
 
 [workspace]
 members = [
-    "dssim-core"
+    "dssim-core",
+    "dssim-vulkan",
 ]
 
 [profile.dev]
