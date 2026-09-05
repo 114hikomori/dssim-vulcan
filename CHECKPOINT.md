@@ -191,3 +191,30 @@ Milestone ids refer to `dssim-vulkan-fable-plan.md` §16 (also listed in `AGENTS
   D65 matrix, cbrt_poly + 2×Halley, ×1.05 / 86.2/220 / 107.9/220 fudges; parity vs CPU
   Lab dumps ≤ 1e-6) (`dssim-vulkan-fable-plan.md` §6 Phase F / VULKAN_PORT_PLAN §4
   Phase 2).
+
+## 2026-09-05 — M5 (Phase F)
+
+- Done: Phase F complete (commit `37c0b4e`). `rgba_to_lab.comp` converts
+  premultiplied-linear RGBA → planar Lab on GPU with every CPU semantic transcribed:
+  alpha dither (n=(x+11)^(y+11), bits 16/8/32, literal `a < 255.0` guard), XYZ matrix
+  rows in fma_matrix order, piecewise cbrt_poly + 2×Halley, the 1.05 / 86.2/220 /
+  107.9/220 fudges, and the gray ×1.16 branch. All 18 constants ship from
+  `dssim_core::tolab::LAB_GPU_CONSTANTS` (new gpu-reference export, expressions copied
+  verbatim from tolab.rs) via push constants. GpuSsim::create_image /
+  create_image_gray now use GPU Lab. Exit observation met on BOTH GPUs (single run):
+  Lab parity test1/alpha1/alpha2 8.345e-7, gray 2.980e-7 (bound 1e-6) with identical
+  worst pixels across devices + dither-activity guard; E2E through GPU Lab: locked
+  full score diff 1.650e-8 (discrete) / 7.076e-8 (integrated), identity == 0.0 exact,
+  gray vs CPU 1.886e-6 (bound 5e-6). Workspace green; clippy clean.
+- Deviated from plan: sRGB gamma LUT + premultiplication stay on CPU (hybrid: the CPU
+  needs the linear RGBAPLU for its 2×2 downsample; moving LUT to GPU only pays off
+  with GPU downsampling — deferred to Phase H opt-in with the GPU box-downsample).
+  Lab drift uses 0.83 of the 1e-6 budget (cbrt_poly division, 2.5-ulp FDiv
+  allowance); downstream budgets (2e-6 map, 5e-6 score) have larger headroom and E2E
+  confirms. VULKAN_PORT_PLAN's "LUT as R32F texture" task subsumed by this deviation.
+- Blocked / open question: none.
+- Next: Phase G — integration & hardening: --gpu CLI flag (output format
+  byte-identical), CPU fallback, backend selection, lavapipe CI job, real-GPU smoke
+  regression, benchmark harness, docs (`dssim-vulkan-fable-plan.md` §6 Phase G /
+  VULKAN_PORT_PLAN §4 Phase 6). CI config changes require explicit user approval
+  (AGENTS.md §8).
