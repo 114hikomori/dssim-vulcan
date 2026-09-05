@@ -141,3 +141,22 @@ Milestone ids refer to `dssim-vulkan-fable-plan.md` §16 (also listed in `AGENTS
   (GPU) end to end, then weighted pooling f64 on CPU; headline: full-pipeline score
   parity vs ssim_locked_values within 5e-6 (`dssim-vulkan-fable-plan.md` §6 Phase E /
   VULKAN_PORT_PLAN.md §4 Phase 5).
+
+## 2026-09-05 — M3 audit notes
+
+- fable-judge audit of M3: VERIFIED WITH CAVEATS (all numeric claims reproduced:
+  28 scale-maps at 1.192e-7 / scores 3.501e-8 on both GPUs; identity exact; blobs
+  byte-identical to recompile; no push; no debris; no scope creep). Two items closed
+  here as one line each:
+- TWINS (closing the audit's process gap — second occurrence of the sink-race pattern):
+  searched tests reading compare-side dumps by scale — found 0 other sites
+  (blur_dump_parity.rs reads create_image-side artifacts only: lab_plane / chan_mu /
+  chan_img; dump_goldens.rs reads nothing by scale). The gen-lock pattern is now present
+  in both dump-consuming test binaries (dump_goldens.rs, ssim_parity.rs).
+- SPIR-V caveat so it is never mistaken for a regression: the compiled blobs contain
+  OpFma = 0 because glslc -O legally folds fma(2.0, x, c) into exact-mul + add —
+  bit-identical since ×2.0 is exact in f32 (one rounding either way). The fma sites are
+  in the GLSL source; NoContraction decorations (43 in 3ch, 13 in 1ch) are present and
+  load-bearing. Do not "restore" OpFma.
+- Blocked / open question: none.
+- Next: unchanged — Phase E (multi-scale GPU pipeline, headline score parity).
