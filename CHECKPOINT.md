@@ -68,3 +68,32 @@ Milestone ids refer to `dssim-vulkan-fable-plan.md` §16 (also listed in `AGENTS
   blur semantics, four boundary cases with exact K5_EDGE_* constants, tiny sizes 1..=8),
   tested against dssim-core's blur + equiv_tests battery, compared against M0's blur
   dumps (`dssim-vulkan-fable-plan.md` §6 Phase C / VULKAN_PORT_PLAN.md §4 Phase 3).
+
+## 2026-09-05 — M2
+
+- Done: Phase C complete (commit `14fb309`). GPU blur = exact transcription of the CPU
+  fused 5-tap into three shaders (blur_h5, blur_h5_mul fused-multiply, blur_v5) with the
+  four-case boundary handling and K5 weights passed via push constants from
+  `dssim_core::blur::K5_REF` (new `gpu-reference` feature: one implementation, two
+  callers). Multi-pass dispatch in ONE submit with barriers (pipeline.dispatch_sequence).
+  Exit observation met twice over: (1) equiv battery ported — constant, gradient, random,
+  step, impulse, strided sub-image, all 64 tiny-size combos, blur_mul incl. strided —
+  max abs 1.192e-7 vs the 2e-6 bound (blur_parity.rs); (2) real-image parity via M0 dumps
+  — 114 Lab-plane/mu pairs, 76 chroma pre-blur+mu double-blur chains, max abs 1.788e-7
+  (blur_dump_parity.rs). Both AMD GPUs (discrete RX 6600M + integrated) pass; workspace
+  green; no new clippy warnings. TWINS check on the submit-race pattern: the only other
+  multi-pass site (smoke) uses single dispatch; fixed dispatch_sequence is now the only
+  multi-pass mechanism.
+- Deviated from plan: none material. (Plan's fused "product + blur" is blur_h5_mul;
+  in-place chroma blur is reproduced as pre-blur + re-blur chain in tests, matching
+  dssim.rs preprocess semantics; final DSSIM never needs in-place on GPU.)
+- Deviation found & fixed (M0 bug): dumps.rs flush_deferred had reversed scale indices —
+  `scale.reverse()` puts the ORIGINAL image at scale 0 (rayon::join recursion-arm pushes
+  complete before the parent's), so depth == post-reverse index. lab_plane/
+  input_rgbaplu labels were deterministic-but-wrong; caught by dump-parity dims check.
+  M0 byte-reproducibility re-verified after fix (816/816 identical).
+- Blocked / open question: none.
+- Next: Phase D — single-scale GPU SSIM: keep Lab on CPU, upload per-scale Lab planes,
+  run mu/sq_blur/cross on GPU (kernels exist), add ssim_combine_3ch + 1ch shaders with
+  fma at the two designated sites, read back SSIM map, pool on CPU, compare map + score
+  against dumps (`dssim-vulkan-fable-plan.md` §6 Phase D / VULKAN_PORT_PLAN.md §4 Phase 4).
