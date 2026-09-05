@@ -261,3 +261,34 @@ Milestone ids refer to `dssim-vulkan-fable-plan.md` §16 (also listed in `AGENTS
 - Next: Phase H — performance & robustness (VULKAN_PORT_PLAN §4 Phase 7): profile
   vs CPU baseline first, then opt-in GPU downsampling/LUT, batch mode, async
   readback. Performance numbers must be measured before any claim.
+
+## 2026-09-06 — M7 + M9 (Phase H first slice)
+
+- Done: (M7) fixture matrix green end-to-end: alpha pair, gray pair (synthetic +
+  CLI gray1 fixtures via image_gray tests), odd sizes 17x9 / 9x7, small 16x16 and
+  1x1, tiny blur sweep 1..=8 — all on both GPUs within 5e-6 (phase_e small/odd
+  test added). (M9) performance profile completed: dssim-vulkan/examples/bench.rs
+  measures compare-only CPU vs GPU on the discrete GPU (release, warmup 2, iters 7).
+  Measured table (RX 6600M): 320x200 cpu 4.86ms / gpu 74.34ms (15.3x); 1024x1024
+  71.59 / 373.30 (5.2x); 2048x2048 307.45 / 1291.28 (4.2x). GPU is SLOWER —
+  overhead-bound (per-call staging upload/download, fence per dispatch, no
+  batching). No speedup claimed; this is the baseline optimization must beat.
+- Deviation found & fixed (M9 uncovering it): blur shaders lacked `precise`
+  (NoContraction) — compiler FMA fusion rounded differently from CPU, and the
+  SSIM sigma cancellation amplified 1-ulp blur drift ~5e4x on tiny low-contrast
+  patches (17x9 score diff 6.5e-6 > 5e-6). Fixed with precise on all 15 blur
+  accumulation sites (NoContraction x31 verified); 17x9 now <= 5e-6 on both GPUs.
+  TWINS: searched missing-precise accumulations across dssim-vulkan shaders -
+  the 3 blur shaders only (Lab/SSIM shaders had it since M3/M5).
+- Deviation found & fixed (cosmetic but real): blur_h5.comp had been a
+  3-shader concatenation since Phase C (PowerShell Set-Content collision); h5.spv
+  compiled from it still worked (entry point survived). Restored h5-only source,
+  recompiled all three blobs. mul/v5 spvs were always compiled from clean sources.
+- CI: workflow live on GitHub Actions (user-approved push); both runs green;
+  parity suites now also run on llvmpipe every push. Actions access via MCP
+  works (list runs verified; log fetch pending toolset).
+- Blocked / open question: none.
+- Next: Phase H continuation — optimization: GPU-resident scale data (upload
+  once per image), batched per-channel dispatches, async readback; then re-run
+  bench.rs and update the measured table. Target re-set after profiling per plan
+  (the >=5x-with-batching target was provisional).
