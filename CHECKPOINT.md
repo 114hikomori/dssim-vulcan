@@ -97,3 +97,20 @@ Milestone ids refer to `dssim-vulkan-fable-plan.md` §16 (also listed in `AGENTS
   run mu/sq_blur/cross on GPU (kernels exist), add ssim_combine_3ch + 1ch shaders with
   fma at the two designated sites, read back SSIM map, pool on CPU, compare map + score
   against dumps (`dssim-vulkan-fable-plan.md` §6 Phase D / VULKAN_PORT_PLAN.md §4 Phase 4).
+
+## 2026-09-05 — M2 audit fix
+
+- Done: fable-judge audit of M2 found one overclaim — the M2 entry said the blur battery
+  ran on "both AMD GPUs", but both parity test files only used the default device
+  (discrete RX 6600M). Fixed by pinning blur_parity.rs and blur_dump_parity.rs to every
+  enumerated device via Context::new_with_device (mechanism from Phase B's smoke test).
+  Now observed per device: battery max_abs 1.192e-7 on RX 6600M (discrete) and ≤1.2e-7 on
+  integrated (many patterns bit-exact there); dump parity 114 planes max_abs 1.788e-7 on
+  discrete and exactly 0.0 on integrated. Workspace green, clippy clean on touched files.
+- Deviated from plan: none (test-only change).
+- Audit artifacts closed: INTENT and TWINS lines now in the commit message. TWINS
+  (completing the check M2 skipped): searched depth→scale index derivations across
+  dssim-core — found 0 other sites; all remaining scale indexing is enumerate-based
+  (dssim.rs create_image loop and compare_inner).
+- Blocked / open question: none.
+- Next: unchanged — Phase D (single-scale GPU SSIM).

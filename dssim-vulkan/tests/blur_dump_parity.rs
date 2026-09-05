@@ -27,7 +27,6 @@ fn decode_rgba(path: &str) -> imgref::ImgVec<dssim_core::RGBAPLU> {
 #[test]
 fn gpu_blur_matches_cpu_dumps() {
     let _ = env_logger::try_init();
-    let context = Arc::new(Context::new().expect("Vulkan context"));
 
     let dir = std::env::temp_dir().join(format!("dssim-blur-dumps-{}", std::process::id()));
     let _guard = dumps::enable(&dir).unwrap();
@@ -52,9 +51,13 @@ fn gpu_blur_matches_cpu_dumps() {
     // `blur_in_place` then `mu = blur(img)`), so `chan_mu` is a double blur
     // and `chan_img` is the pre-blurred plane — the GPU test reproduces both
     // stages, mirroring what Phase D's pipeline must do.
-    let mut checked = 0usize;
     let mut chroma_pre_checked = 0usize;
     let mut max_overall = 0.0f64;
+
+    // Collect (name, lab, chan_img, mu) quadruples once, then blur on every
+    // enumerated device — the parity claim must hold per real GPU (M2 audit
+    // fix), not just the best-ranked one.
+    let mut pairs: Vec<(String, Dump, Dump, Dump)> = Vec::new();
     for entry in std::fs::read_dir(&dir).unwrap() {
         let name = entry.unwrap().file_name().to_string_lossy().into_owned();
         if !name.starts_with("lab_plane.") {
@@ -72,68 +75,88 @@ fn gpu_blur_matches_cpu_dumps() {
             "{name}: dims mismatch vs {mu_name}"
         );
         assert_eq!(lab.header.stride, lab.header.width, "{name}: expected tight dump");
-        let (w, h) = (lab.header.width as usize, lab.header.height as usize);
-        assert_eq!(lab.data.len(), w * h);
-        let channel = lab.header.channel;
+        pairs.push((name, lab, chan_img, mu));
+    }
+    drop(d);
 
-        // Stage 1: single blur of the raw Lab plane.
-        let gpu_pre = blur_gpu(&context, &lab.data, w, h, w)
-            .unwrap_or_else(|e| panic!("{name}: GPU blur failed: {e}"));
+    let probe = Context::new().expect("Vulkan context");
+    let candidates = probe.device_candidates.clone();
+    drop(probe);
 
-        if channel == 0 {
-            // L channel: mu = blur(lab) directly.
-            for (i, (c, g)) in mu.data.iter().zip(gpu_pre.iter()).enumerate() {
-                let diff = (f64::from(*c) - f64::from(*g)).abs();
-                if diff > max_overall {
-                    max_overall = diff;
-                }
-                assert!(
-                    diff <= TOL,
-                    "{name}: pixel {i} (x={}, y={}) diverged: cpu={} gpu={} ({diff:.3e} > {TOL:.0e})",
-                    i % w,
-                    i / w,
-                    c,
-                    g
-                );
-            }
-        } else {
-            // Chroma: stage 1 output must equal the CPU's in-place pre-blur.
-            for (i, (c, g)) in chan_img.data.iter().zip(gpu_pre.iter()).enumerate() {
-                let diff = (f64::from(*c) - f64::from(*g)).abs();
-                if diff > max_overall {
-                    max_overall = diff;
-                }
-                assert!(
-                    diff <= TOL,
-                    "{name} pre-blur: pixel {i} diverged: cpu={} gpu={} ({diff:.3e} > {TOL:.0e})",
-                    c,
-                    g
-                );
-            }
-            chroma_pre_checked += 1;
+    for (dev_idx, dev_name) in candidates.iter().enumerate() {
+        let context = Arc::new(Context::new_with_device(dev_idx).expect("pinned context"));
+        let dev_tag = format!("[d{dev_idx} {dev_name}]");
+        let mut max_dev = 0.0f64;
+        for (name, lab, chan_img, mu) in &pairs {
+            let (w, h) = (lab.header.width as usize, lab.header.height as usize);
+            assert_eq!(lab.data.len(), w * h);
+            let channel = lab.header.channel;
 
-            // Stage 2: mu = blur(pre-blurred plane).
-            let gpu_mu = blur_gpu(&context, &gpu_pre, w, h, w)
-                .unwrap_or_else(|e| panic!("{name}: GPU re-blur failed: {e}"));
-            for (i, (c, g)) in mu.data.iter().zip(gpu_mu.iter()).enumerate() {
-                let diff = (f64::from(*c) - f64::from(*g)).abs();
-                if diff > max_overall {
-                    max_overall = diff;
+            // Stage 1: single blur of the raw Lab plane.
+            let gpu_pre = blur_gpu(&context, &lab.data, w, h, w)
+                .unwrap_or_else(|e| panic!("{name}{dev_tag}: GPU blur failed: {e}"));
+
+            if channel == 0 {
+                // L channel: mu = blur(lab) directly.
+                for (i, (c, g)) in mu.data.iter().zip(gpu_pre.iter()).enumerate() {
+                    let diff = (f64::from(*c) - f64::from(*g)).abs();
+                    if diff > max_dev {
+                        max_dev = diff;
+                    }
+                    assert!(
+                        diff <= TOL,
+                        "{name}{dev_tag}: pixel {i} (x={}, y={}) diverged: cpu={} gpu={} ({diff:.3e} > {TOL:.0e})",
+                        i % w,
+                        i / w,
+                        c,
+                        g
+                    );
                 }
-                assert!(
-                    diff <= TOL,
-                    "{name} mu: pixel {i} diverged: cpu={} gpu={} ({diff:.3e} > {TOL:.0e})",
-                    c,
-                    g
-                );
+            } else {
+                // Chroma: stage 1 output must equal the CPU's in-place pre-blur.
+                for (i, (c, g)) in chan_img.data.iter().zip(gpu_pre.iter()).enumerate() {
+                    let diff = (f64::from(*c) - f64::from(*g)).abs();
+                    if diff > max_dev {
+                        max_dev = diff;
+                    }
+                    assert!(
+                        diff <= TOL,
+                        "{name}{dev_tag} pre-blur: pixel {i} diverged: cpu={} gpu={} ({diff:.3e} > {TOL:.0e})",
+                        c,
+                        g
+                    );
+                }
+                chroma_pre_checked += 1;
+
+                // Stage 2: mu = blur(pre-blurred plane).
+                let gpu_mu = blur_gpu(&context, &gpu_pre, w, h, w)
+                    .unwrap_or_else(|e| panic!("{name}{dev_tag}: GPU re-blur failed: {e}"));
+                for (i, (c, g)) in mu.data.iter().zip(gpu_mu.iter()).enumerate() {
+                    let diff = (f64::from(*c) - f64::from(*g)).abs();
+                    if diff > max_dev {
+                        max_dev = diff;
+                    }
+                    assert!(
+                        diff <= TOL,
+                        "{name}{dev_tag} mu: pixel {i} diverged: cpu={} gpu={} ({diff:.3e} > {TOL:.0e})",
+                        c,
+                        g
+                    );
+                }
             }
         }
-        checked += 1;
+        eprintln!("device {dev_idx} ({dev_name}): {} planes, max_abs={max_dev:.3e}", pairs.len());
+        if max_dev > max_overall {
+            max_overall = max_dev;
+        }
     }
 
-    assert!(checked >= 40, "expected 40+ lab/mu pairs across scenarios, got {checked}");
+    assert!(pairs.len() >= 40, "expected 40+ lab/mu pairs across scenarios, got {}", pairs.len());
     eprintln!(
-        "gpu_blur_matches_cpu_dumps: {checked} planes ({chroma_pre_checked} chroma pre-blur+mu chains), max_abs={max_overall:.3e}"
+        "gpu_blur_matches_cpu_dumps: {} device-runs of {} planes ({} chroma chains each), max_abs={max_overall:.3e}",
+        candidates.len(),
+        pairs.len(),
+        chroma_pre_checked / candidates.len().max(1)
     );
     assert!(
         max_overall <= TOL,
