@@ -8,6 +8,8 @@
 mod blur;
 mod c_api;
 mod dssim;
+#[cfg(feature = "dssim-dumps")]
+pub mod dumps;
 /// cbindgen:ignore
 mod ffi;
 mod image;

@@ -251,6 +251,8 @@ dependencies = [
 [[package]]
 name = "imgref"
 version = "1.12.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e44b0a4eaa4c82f441d50a963f2d5f05a787240aeee097597033e72accfd22f"
 
 [[package]]
 name = "itertools"
@@ -348,7 +350,9 @@ dependencies = [
 
 [[package]]
 name = "load_image"
-version = "3.4.0"
+version = "3.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dec91a6048c166e5f54736399d7b7e40616560d988c06937480c26555c316b98"
 dependencies = [
  "aom-decode",
  "bytemuck",

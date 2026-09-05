@@ -209,14 +209,33 @@ impl Dssim {
     {
         let num_scales = self.scale_weights.len();
         let mut scale = Vec::with_capacity(num_scales);
-        Self::make_scales_recursive(num_scales, MaybeArc::Borrowed(src_img), &mut scale);
+        #[cfg(feature = "dssim-dumps")]
+        crate::dumps::next_run();
+        Self::make_scales_recursive(num_scales, 0, MaybeArc::Borrowed(src_img), &mut scale);
         scale.reverse(); // depth-first made smallest scales first
+
+        #[cfg(feature = "dssim-dumps")]
+        {
+            crate::dumps::flush_deferred(scale.len());
+            for (n, sc) in scale.iter().enumerate() {
+                let w = sc.chan[0].width;
+                let h = sc.chan[0].height;
+                crate::dumps::dump_dims(n as u32, w, h);
+                for (c, ch) in sc.chan.iter().enumerate() {
+                    if let Some(img) = &ch.img {
+                        crate::dumps::dump_plane("chan_img", n as u32, c as u32, img);
+                    }
+                    crate::dumps::dump_buf("chan_mu", n as u32, c as u32, w, h, &ch.mu);
+                    crate::dumps::dump_buf("chan_sq_blur", n as u32, c as u32, w, h, &ch.img_sq_blur);
+                }
+            }
+        }
 
         Some(DssimImage { scale })
     }
 
     #[inline(never)]
-    fn make_scales_recursive<InBitmap, OutBitmap>(scales_left: usize, image: MaybeArc<'_, InBitmap>, scales: &mut Vec<DssimChanScale<f32>>)
+    fn make_scales_recursive<InBitmap, OutBitmap>(scales_left: usize, depth: usize, image: MaybeArc<'_, InBitmap>, scales: &mut Vec<DssimChanScale<f32>>)
     where
         InBitmap: ToLABBitmap + Send + Sync + Downsample<Output = OutBitmap>,
         OutBitmap: ToLABBitmap + Send + Sync + Downsample<Output = OutBitmap>,
@@ -226,6 +245,11 @@ impl Dssim {
             let image = image.clone();
             move || {
                 let lab = image.to_lab();
+                #[cfg(feature = "dssim-dumps")]
+                {
+                    image.dump_input_image(depth);
+                    crate::dumps::defer_lab(depth, &lab);
+                }
                 drop(image); // Free larger RGB image ASAP
                 DssimChanScale {
                     chan: lab.into_par_iter().with_max_len(1).enumerate().map(|(n,l)| {
@@ -247,7 +271,7 @@ impl Dssim {
                     let down = image.downsample();
                     drop(image);
                     if let Some(downsampled) = down {
-                        Self::make_scales_recursive(scales_left - 1, MaybeArc::Owned(Arc::new(downsampled)), scales);
+                        Self::make_scales_recursive(scales_left - 1, depth + 1, MaybeArc::Owned(Arc::new(downsampled)), scales);
                     }
                 }
             }
@@ -266,6 +290,8 @@ impl Dssim {
 
     #[inline(never)]
     fn compare_inner(&self, original_image: &DssimImage<f32>, modified_image: &DssimImage<f32>) -> (Val, Vec<SsimMap>) {
+        #[cfg(feature = "dssim-dumps")]
+        crate::dumps::next_run();
         let scaled_images_iter = modified_image.scale.iter().zip(original_image.scale.iter());
         let combined_iter = self.scale_weights.iter().copied().zip(scaled_images_iter).enumerate();
 
@@ -285,21 +311,33 @@ impl Dssim {
                         original_image_scale.chan[c]
                             .img1_img2_blur(&modified_image_scale.chan[c], tmp)
                     }).collect();
+                    #[cfg(feature = "dssim-dumps")]
+                    for (c, v) in img1_img2_blur.iter().enumerate() {
+                        crate::dumps::dump_buf("cross_blur", n as u32, c as u32, scale_width, scale_height, v);
+                    }
                     Self::compare_scale_3ch(original_image_scale, modified_image_scale, &img1_img2_blur)
                 },
                 1 => {
                     let mut tmp_buf: Vec<f32> = Vec::with_capacity(pixels);
                     let tmp = &mut tmp_buf.spare_capacity_mut()[..pixels];
                     let img1_img2_blur = original_image_scale.chan[0].img1_img2_blur(&modified_image_scale.chan[0], tmp);
+                    #[cfg(feature = "dssim-dumps")]
+                    crate::dumps::dump_buf("cross_blur", n as u32, 0, scale_width, scale_height, &img1_img2_blur);
                     Self::compare_scale(&original_image_scale.chan[0], &modified_image_scale.chan[0], &img1_img2_blur)
                 },
                 _ => panic!(),
             };
 
+            #[cfg(feature = "dssim-dumps")]
+            crate::dumps::dump_plane("ssim_map", n as u32, crate::dumps::CHANNEL_NA, &ssim_map);
+
             let sum = ssim_map.pixels().fold(0., |sum, i| sum + f64::from(i));
             let len = (ssim_map.width()*ssim_map.height()) as f64;
             let avg = (sum / len).max(0.0).powf((0.5_f64).powf(n as f64));
             let score = 1.0 - (ssim_map.pixels().fold(0., |sum, i| sum + (avg - f64::from(i)).abs()) / len);
+
+            #[cfg(feature = "dssim-dumps")]
+            crate::dumps::dump_scalar("score_ssim", n as u32, crate::dumps::CHANNEL_NA, score as f32);
 
             let map = if self.save_maps_scales as usize > n {
                 Some(SsimMap {
@@ -323,7 +361,11 @@ impl Dssim {
             }
         }
 
-        (to_dssim(ssim_sum / weight_sum).into(), ssim_maps)
+        let dssim = to_dssim(ssim_sum / weight_sum);
+        #[cfg(feature = "dssim-dumps")]
+        crate::dumps::dump_scalar("score_dssim", crate::dumps::CHANNEL_NA, crate::dumps::CHANNEL_NA, dssim as f32);
+
+        (dssim.into(), ssim_maps)
     }
 
     /// 3-channel SSIM combine, scalar but unrolled across L/a/b. Reads the three

@@ -67,6 +67,12 @@ fn cbrt_poly(x: f32) -> f32 {
 /// It should return 1 (gray) or 3 (color) planes.
 pub trait ToLABBitmap {
     fn to_lab(&self) -> Vec<GBitmap>;
+
+    /// Test-only hook (feature `dssim-dumps`): record this image's pixels into
+    /// the dump sink as planar f32 payloads (4 comps for RGBA, 3 for RGB, 1 for
+    /// gray). No-op unless a dump sink is enabled. Default does nothing.
+    #[cfg(feature = "dssim-dumps")]
+    fn dump_input_image(&self, _depth: usize) {}
 }
 
 impl ToLABBitmap for ImgVec<RGBAPLU> {
@@ -74,12 +80,22 @@ impl ToLABBitmap for ImgVec<RGBAPLU> {
     fn to_lab(&self) -> Vec<GBitmap> {
         self.as_ref().to_lab()
     }
+
+    #[cfg(feature = "dssim-dumps")]
+    fn dump_input_image(&self, depth: usize) {
+        self.as_ref().dump_input_image(depth)
+    }
 }
 
 impl ToLABBitmap for ImgVec<RGBLU> {
     #[inline(always)]
     fn to_lab(&self) -> Vec<GBitmap> {
         self.as_ref().to_lab()
+    }
+
+    #[cfg(feature = "dssim-dumps")]
+    fn dump_input_image(&self, depth: usize) {
+        self.as_ref().dump_input_image(depth)
     }
 }
 impl ToLABBitmap for GBitmap {
@@ -98,6 +114,12 @@ impl ToLABBitmap for GBitmap {
         let out = self.pixels().map(f).collect();
 
         vec![Self::new(out, self.width(), self.height())]
+    }
+
+    #[cfg(feature = "dssim-dumps")]
+    fn dump_input_image(&self, depth: usize) {
+        let data: Vec<f32> = self.pixels().collect();
+        crate::dumps::defer_bitmap("input_rgbaplu", depth, 0, self.width(), self.height(), &data);
     }
 }
 
@@ -151,6 +173,23 @@ impl ToLABBitmap for ImgRef<'_, RGBAPLU> {
             px.to_rgb(n).to_lab()
         })
     }
+
+    #[cfg(feature = "dssim-dumps")]
+    fn dump_input_image(&self, depth: usize) {
+        let mut r = Vec::with_capacity(self.pixels().count());
+        let mut g = Vec::with_capacity(self.pixels().count());
+        let mut b = Vec::with_capacity(self.pixels().count());
+        let mut a = Vec::with_capacity(self.pixels().count());
+        for px in self.pixels() {
+            r.push(px.r);
+            g.push(px.g);
+            b.push(px.b);
+            a.push(px.a);
+        }
+        for (chan, data) in [(0u32, r), (1, g), (2, b), (3, a)] {
+            crate::dumps::defer_bitmap("input_rgbaplu", depth, chan, self.width(), self.height(), &data);
+        }
+    }
 }
 
 impl ToLABBitmap for ImgRef<'_, RGBLU> {
@@ -159,6 +198,21 @@ impl ToLABBitmap for ImgRef<'_, RGBLU> {
         rgb_to_lab(*self, |px, _n|{
             px.to_lab()
         })
+    }
+
+    #[cfg(feature = "dssim-dumps")]
+    fn dump_input_image(&self, depth: usize) {
+        let mut r = Vec::with_capacity(self.pixels().count());
+        let mut g = Vec::with_capacity(self.pixels().count());
+        let mut b = Vec::with_capacity(self.pixels().count());
+        for px in self.pixels() {
+            r.push(px.r);
+            g.push(px.g);
+            b.push(px.b);
+        }
+        for (chan, data) in [(0u32, r), (1, g), (2, b)] {
+            crate::dumps::defer_bitmap("input_rgbaplu", depth, chan, self.width(), self.height(), &data);
+        }
     }
 }
 
