@@ -129,9 +129,34 @@ fn phase_e_locked_values() {
     }
 }
 
+/// M7 close-out: the full pipeline on small and odd-size images —
+/// below/around the 8-px scale cutoff, exercising the scale-count edge.
 #[test]
-fn phase_e_cpu_reference_parity() {
+fn phase_e_small_and_odd_sizes() {
     let _gpu = gpu_lock();
+
+    for (w, h) in [(16usize, 16usize), (17usize, 9usize), (9usize, 7usize), (1usize, 1usize)] {
+        let a = synth_gray(w, h, 0x5EED_0000 + (w * 31 + h) as u64);
+        let b = synth_gray(w, h, 0xC0FF_EE00 + (w * 17 + h) as u64);
+
+        for (dev_idx, context) in all_devices() {
+            let gpu = GpuSsim::new(context).unwrap();
+            let r = gpu.create_image_gray(&a).unwrap();
+            let m = gpu.create_image_gray(&b).unwrap();
+            let got = gpu.compare(&r, &m).unwrap();
+            let cpu = cpu_score(&a, &b);
+            let diff = (got - cpu).abs();
+            eprintln!("gray {w}x{h} [d{dev_idx}]: gpu={got:.12} cpu={cpu:.12} diff={diff:.3e}");
+            assert!(
+                diff <= TOL,
+                "{w}x{h} [d{dev_idx}]: GPU dssim {got} vs CPU {cpu} ({diff:.3e} > {TOL:.0e})"
+            );
+        }
+    }
+}
+
+#[test]
+fn phase_e_cpu_reference_parity() {    let _gpu = gpu_lock();
     let img1 = decode_rgba("../tests/test1-sm.png");
     let img2 = decode_rgba("../tests/test2-sm.png");
     let alpha1 = decode_rgba("../tests/alpha1.png");

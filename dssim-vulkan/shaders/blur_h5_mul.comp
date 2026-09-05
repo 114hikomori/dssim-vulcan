@@ -8,6 +8,10 @@
 //   dims2: uvec4  (dst_stride, 0, 0, 0)
 //   k1   : vec4   (K5_OUTER, K5_INNER, K5_MID, K5_EDGE_CENTER)
 //   k2   : vec2   (K5_EDGE_NEAR, K5_EDGE_FAR)
+//
+// `precise` (SPIR-V NoContraction) on every result: the CPU rounds each
+// multiply/add separately, and the SSIM sigma terms amplify any fused
+// rounding by ~5e4x (observed 2.5e-5 map divergence at 17x9 without it).
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
@@ -46,20 +50,23 @@ void main() {
         float q0 = src1_data[r1 + 0u] * src2_data[r2 + 0u];
         float q1 = src1_data[r1 + min(1u, last)] * src2_data[r2 + min(1u, last)];
         float q2 = src1_data[r1 + min(2u, last)] * src2_data[r2 + min(2u, last)];
-        dst_data[dst_row + x] = pc.k1.w * q0 + pc.k2.x * q1 + pc.k2.y * q2;
+        precise float result = pc.k1.w * q0 + pc.k2.x * q1 + pc.k2.y * q2;
+        dst_data[dst_row + x] = result;
     } else if (x == last && w >= 2u) {
         float ql = src1_data[r1 + last] * src2_data[r2 + last];
         float ql1 = src1_data[r1 + last - 1u] * src2_data[r2 + last - 1u];
         float ql2 = src1_data[r1 + (last >= 2u ? last - 2u : 0u)]
                   * src2_data[r2 + (last >= 2u ? last - 2u : 0u)];
-        dst_data[dst_row + x] = pc.k2.y * ql2 + pc.k2.x * ql1 + pc.k1.w * ql;
+        precise float result = pc.k2.y * ql2 + pc.k2.x * ql1 + pc.k1.w * ql;
+        dst_data[dst_row + x] = result;
     } else if (x == 1u && w >= 3u) {
         float m2 = src1_data[r1 + 0u] * src2_data[r2 + 0u];
         float m1 = m2;
         float c = src1_data[r1 + 1u] * src2_data[r2 + 1u];
         float p1n = src1_data[r1 + min(2u, last)] * src2_data[r2 + min(2u, last)];
         float p2n = src1_data[r1 + min(3u, last)] * src2_data[r2 + min(3u, last)];
-        dst_data[dst_row + x] = (m2 + p2n) * pc.k1.x + (m1 + p1n) * pc.k1.y + c * pc.k1.z;
+        precise float result = (m2 + p2n) * pc.k1.x + (m1 + p1n) * pc.k1.y + c * pc.k1.z;
+        dst_data[dst_row + x] = result;
     } else if (x == last - 1u && w >= 4u) {
         uint i = last - 1u;
         float m2 = src1_data[r1 + i - 2u] * src2_data[r2 + i - 2u];
@@ -67,13 +74,15 @@ void main() {
         float c = src1_data[r1 + i] * src2_data[r2 + i];
         float p1n = src1_data[r1 + i + 1u] * src2_data[r2 + i + 1u];
         float p2n = src1_data[r1 + min(i + 2u, last)] * src2_data[r2 + min(i + 2u, last)];
-        dst_data[dst_row + x] = (m2 + p2n) * pc.k1.x + (m1 + p1n) * pc.k1.y + c * pc.k1.z;
+        precise float result = (m2 + p2n) * pc.k1.x + (m1 + p1n) * pc.k1.y + c * pc.k1.z;
+        dst_data[dst_row + x] = result;
     } else {
         float m2 = src1_data[r1 + x - 2u] * src2_data[r2 + x - 2u];
         float m1 = src1_data[r1 + x - 1u] * src2_data[r2 + x - 1u];
         float c = src1_data[r1 + x] * src2_data[r2 + x];
         float p1 = src1_data[r1 + x + 1u] * src2_data[r2 + x + 1u];
         float p2 = src1_data[r1 + x + 2u] * src2_data[r2 + x + 2u];
-        dst_data[dst_row + x] = (m2 + p2) * pc.k1.x + (m1 + p1) * pc.k1.y + c * pc.k1.z;
+        precise float result = (m2 + p2) * pc.k1.x + (m1 + p1) * pc.k1.y + c * pc.k1.z;
+        dst_data[dst_row + x] = result;
     }
 }

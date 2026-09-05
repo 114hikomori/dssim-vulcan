@@ -47,13 +47,15 @@ void main() {
         float p1 = src_data[src_row + min(1u, last)];
         float p2 = src_data[src_row + min(2u, last)];
         // Edge j=0: H1·H1-derived 3-coefficient form.
-        dst_data[dst_row + x] = pc.k1.w * p0 + pc.k2.x * p1 + pc.k2.y * p2;
+        precise float result = pc.k1.w * p0 + pc.k2.x * p1 + pc.k2.y * p2;
+        dst_data[dst_row + x] = result;
     } else if (x == last && w >= 2u) {
         // Edge j=w-1 (mirror of j=0); skipped when width==1.
         float pl = src_data[src_row + last];
         float pl1 = src_data[src_row + last - 1u];
         float pl2 = src_data[src_row + (last >= 2u ? last - 2u : 0u)];
-        dst_data[dst_row + x] = pc.k2.y * pl2 + pc.k2.x * pl1 + pc.k1.w * pl;
+        precise float result = pc.k2.y * pl2 + pc.k2.x * pl1 + pc.k1.w * pl;
+        dst_data[dst_row + x] = result;
     } else if (x == 1u && w >= 3u) {
         // Near-edge j=1 — plain clamped 5-tap (m2 and m1 both clamp to 0).
         float m2 = src_data[src_row + 0u];
@@ -61,7 +63,8 @@ void main() {
         float c = src_data[src_row + 1u];
         float p1n = src_data[src_row + min(2u, last)];
         float p2n = src_data[src_row + min(3u, last)];
-        dst_data[dst_row + x] = (m2 + p2n) * pc.k1.x + (m1 + p1n) * pc.k1.y + c * pc.k1.z;
+        precise float result = (m2 + p2n) * pc.k1.x + (m1 + p1n) * pc.k1.y + c * pc.k1.z;
+        dst_data[dst_row + x] = result;
     } else if (x == last - 1u && w >= 4u) {
         // Near-edge j=w-2 — plain clamped 5-tap (p2n clamps to last).
         uint i = last - 1u;
@@ -70,7 +73,8 @@ void main() {
         float c = src_data[src_row + i];
         float p1n = src_data[src_row + i + 1u];
         float p2n = src_data[src_row + min(i + 2u, last)];
-        dst_data[dst_row + x] = (m2 + p2n) * pc.k1.x + (m1 + p1n) * pc.k1.y + c * pc.k1.z;
+        precise float result = (m2 + p2n) * pc.k1.x + (m1 + p1n) * pc.k1.y + c * pc.k1.z;
+        dst_data[dst_row + x] = result;
     } else {
         // Interior j ∈ [2, w-2): plain 5-tap. Only reachable when w >= 5.
         float m2 = src_data[src_row + x - 2u];
@@ -78,159 +82,7 @@ void main() {
         float c = src_data[src_row + x];
         float p1 = src_data[src_row + x + 1u];
         float p2 = src_data[src_row + x + 2u];
-        dst_data[dst_row + x] = (m2 + p2) * pc.k1.x + (m1 + p1) * pc.k1.y + c * pc.k1.z;
-    }
-}
-#version 450
-// Horizontal 5-tap blur pass with fused element-wise multiply — exact
-// transcription of blur.rs blur_h5_mul: same 4-case boundary handling,
-// applied to q[i] = src1[i] * src2[i]. Weights via push constants.
-//
-// Push constant layout (56 bytes):
-//   dims : uvec4  (width, height, src1_stride, src2_stride)
-//   dims2: uvec4  (dst_stride, 0, 0, 0)
-//   k1   : vec4   (K5_OUTER, K5_INNER, K5_MID, K5_EDGE_CENTER)
-//   k2   : vec2   (K5_EDGE_NEAR, K5_EDGE_FAR)
-
-layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
-
-layout(std430, set = 0, binding = 0) readonly buffer Src1 {
-    float src1_data[];
-};
-layout(std430, set = 0, binding = 1) readonly buffer Src2 {
-    float src2_data[];
-};
-layout(std430, set = 0, binding = 2) writeonly buffer Dst {
-    float dst_data[];
-};
-
-layout(push_constant) uniform PC {
-    uvec4 dims;
-    uvec4 dims2;
-    vec4 k1;
-    vec2 k2;
-} pc;
-
-void main() {
-    uint w = pc.dims.x;
-    uint h = pc.dims.y;
-    uint idx = gl_GlobalInvocationID.x;
-    if (idx >= w * h) {
-        return;
-    }
-    uint y = idx / w;
-    uint x = idx % w;
-    uint last = w - 1u;
-    uint r1 = y * pc.dims.z;
-    uint r2 = y * pc.dims.w;
-    uint dst_row = y * pc.dims2.x;
-
-    if (x == 0u) {
-        float q0 = src1_data[r1 + 0u] * src2_data[r2 + 0u];
-        float q1 = src1_data[r1 + min(1u, last)] * src2_data[r2 + min(1u, last)];
-        float q2 = src1_data[r1 + min(2u, last)] * src2_data[r2 + min(2u, last)];
-        dst_data[dst_row + x] = pc.k1.w * q0 + pc.k2.x * q1 + pc.k2.y * q2;
-    } else if (x == last && w >= 2u) {
-        float ql = src1_data[r1 + last] * src2_data[r2 + last];
-        float ql1 = src1_data[r1 + last - 1u] * src2_data[r2 + last - 1u];
-        float ql2 = src1_data[r1 + (last >= 2u ? last - 2u : 0u)]
-                  * src2_data[r2 + (last >= 2u ? last - 2u : 0u)];
-        dst_data[dst_row + x] = pc.k2.y * ql2 + pc.k2.x * ql1 + pc.k1.w * ql;
-    } else if (x == 1u && w >= 3u) {
-        float m2 = src1_data[r1 + 0u] * src2_data[r2 + 0u];
-        float m1 = m2;
-        float c = src1_data[r1 + 1u] * src2_data[r2 + 1u];
-        float p1n = src1_data[r1 + min(2u, last)] * src2_data[r2 + min(2u, last)];
-        float p2n = src1_data[r1 + min(3u, last)] * src2_data[r2 + min(3u, last)];
-        dst_data[dst_row + x] = (m2 + p2n) * pc.k1.x + (m1 + p1n) * pc.k1.y + c * pc.k1.z;
-    } else if (x == last - 1u && w >= 4u) {
-        uint i = last - 1u;
-        float m2 = src1_data[r1 + i - 2u] * src2_data[r2 + i - 2u];
-        float m1 = src1_data[r1 + i - 1u] * src2_data[r2 + i - 1u];
-        float c = src1_data[r1 + i] * src2_data[r2 + i];
-        float p1n = src1_data[r1 + i + 1u] * src2_data[r2 + i + 1u];
-        float p2n = src1_data[r1 + min(i + 2u, last)] * src2_data[r2 + min(i + 2u, last)];
-        dst_data[dst_row + x] = (m2 + p2n) * pc.k1.x + (m1 + p1n) * pc.k1.y + c * pc.k1.z;
-    } else {
-        float m2 = src1_data[r1 + x - 2u] * src2_data[r2 + x - 2u];
-        float m1 = src1_data[r1 + x - 1u] * src2_data[r2 + x - 1u];
-        float c = src1_data[r1 + x] * src2_data[r2 + x];
-        float p1 = src1_data[r1 + x + 1u] * src2_data[r2 + x + 1u];
-        float p2 = src1_data[r1 + x + 2u] * src2_data[r2 + x + 2u];
-        dst_data[dst_row + x] = (m2 + p2) * pc.k1.x + (m1 + p1) * pc.k1.y + c * pc.k1.z;
-    }
-}
-#version 450
-// Vertical 5-tap blur pass — exact transcription of blur.rs blur_v5,
-// same 4-case boundary structure (y=0 / y=h-1 edges, y=1 / y=h-2
-// near-edges, interior). src must be tightly packed (stride == width),
-// matching the CPU contract.
-//
-// Push constant layout (56 bytes):
-//   dims : uvec4  (width, height, 0, 0)
-//   dims2: uvec4  (dst_stride, 0, 0, 0)
-//   k1   : vec4   (K5_OUTER, K5_INNER, K5_MID, K5_EDGE_CENTER)
-//   k2   : vec2   (K5_EDGE_NEAR, K5_EDGE_FAR)
-
-layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
-
-layout(std430, set = 0, binding = 0) readonly buffer Src {
-    float src_data[];
-};
-layout(std430, set = 0, binding = 1) writeonly buffer Dst {
-    float dst_data[];
-};
-
-layout(push_constant) uniform PC {
-    uvec4 dims;
-    uvec4 dims2;
-    vec4 k1;
-    vec2 k2;
-} pc;
-
-void main() {
-    uint w = pc.dims.x;
-    uint h = pc.dims.y;
-    uint idx = gl_GlobalInvocationID.x;
-    if (idx >= w * h) {
-        return;
-    }
-    uint y = idx / w;
-    uint x = idx % w;
-    uint last_y = h - 1u;
-    uint dst_row = y * pc.dims2.x;
-
-    if (y == 0u) {
-        float r0 = src_data[0u * w + x];
-        float r1 = src_data[min(1u, last_y) * w + x];
-        float r2 = src_data[min(2u, last_y) * w + x];
-        dst_data[dst_row + x] = pc.k1.w * r0 + pc.k2.x * r1 + pc.k2.y * r2;
-    } else if (y == last_y && h >= 2u) {
-        float rl = src_data[last_y * w + x];
-        float rl1 = src_data[(last_y - 1u) * w + x];
-        float rl2 = src_data[(last_y >= 2u ? last_y - 2u : 0u) * w + x];
-        dst_data[dst_row + x] = pc.k2.y * rl2 + pc.k2.x * rl1 + pc.k1.w * rl;
-    } else if (y == 1u && h >= 3u) {
-        float rm = src_data[0u * w + x];
-        float rc = src_data[1u * w + x];
-        float rp1 = src_data[min(2u, last_y) * w + x];
-        float rp2 = src_data[min(3u, last_y) * w + x];
-        // m2 and m1 both clamp to row 0.
-        dst_data[dst_row + x] = (rm + rp2) * pc.k1.x + (rm + rp1) * pc.k1.y + rc * pc.k1.z;
-    } else if (y == last_y - 1u && h >= 4u) {
-        uint yy = last_y - 1u;
-        float rm2 = src_data[(yy - 2u) * w + x];
-        float rm1 = src_data[(yy - 1u) * w + x];
-        float rc = src_data[yy * w + x];
-        float rp1 = src_data[(yy + 1u) * w + x];
-        float rp2 = src_data[min(yy + 2u, last_y) * w + x];
-        dst_data[dst_row + x] = (rm2 + rp2) * pc.k1.x + (rm1 + rp1) * pc.k1.y + rc * pc.k1.z;
-    } else {
-        float rm2 = src_data[(y - 2u) * w + x];
-        float rm1 = src_data[(y - 1u) * w + x];
-        float rc = src_data[y * w + x];
-        float rp1 = src_data[(y + 1u) * w + x];
-        float rp2 = src_data[(y + 2u) * w + x];
-        dst_data[dst_row + x] = (rm2 + rp2) * pc.k1.x + (rm1 + rp1) * pc.k1.y + rc * pc.k1.z;
+        precise float result = (m2 + p2) * pc.k1.x + (m1 + p1) * pc.k1.y + c * pc.k1.z;
+        dst_data[dst_row + x] = result;
     }
 }
