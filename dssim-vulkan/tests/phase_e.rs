@@ -69,14 +69,7 @@ where
     f64::from(d.compare(&r, m).0)
 }
 
-fn gpu_vs_cpu<B>(gpu: &GpuSsim, name: &str, reference: &B, modified: &B) -> f64
-where
-    B: ToLABBitmap + Downsample<Output = B> + Send + Sync + Clone,
-{
-    let r = gpu.create_image(reference).unwrap();
-    let m = gpu.create_image(modified).unwrap();
-    let gpu_score = gpu.compare(&r, &m).unwrap();
-    let cpu = cpu_score(reference, modified);
+fn assert_parity(name: &str, gpu_score: f64, cpu: f64) -> f64 {
     let diff = (gpu_score - cpu).abs();
     assert!(
         diff <= TOL,
@@ -148,9 +141,19 @@ fn phase_e_cpu_reference_parity() {
 
     for (dev_idx, context) in all_devices() {
         let gpu = GpuSsim::new(context).unwrap();
-        gpu_vs_cpu(&gpu, "full[recheck]", &img1, &img2);
-        gpu_vs_cpu(&gpu, "alpha", &alpha1, &alpha2);
-        gpu_vs_cpu(&gpu, "gray(1ch)", &g1, &g2);
+
+        let r = gpu.create_image(&img1).unwrap();
+        let m = gpu.create_image(&img2).unwrap();
+        assert_parity("full[recheck]", gpu.compare(&r, &m).unwrap(), cpu_score(&img1, &img2));
+
+        let r = gpu.create_image(&alpha1).unwrap();
+        let m = gpu.create_image(&alpha2).unwrap();
+        assert_parity("alpha", gpu.compare(&r, &m).unwrap(), cpu_score(&alpha1, &alpha2));
+
+        // Gray pipeline: GPU Lab (1ch ×1.16 branch) + 1ch combine.
+        let r = gpu.create_image_gray(&g1).unwrap();
+        let m = gpu.create_image_gray(&g2).unwrap();
+        assert_parity("gray(1ch)", gpu.compare(&r, &m).unwrap(), cpu_score(&g1, &g2));
         let _ = dev_idx;
     }
 }

@@ -6,6 +6,7 @@
 //! transfers, compute dispatch) proven by the ×2 smoke shader.
 
 pub mod blur;
+pub mod color;
 pub mod context;
 pub mod error;
 pub mod pipeline;
@@ -14,6 +15,7 @@ pub mod ssim;
 pub mod transfer;
 
 pub use blur::{blur_gpu, blur_mul_gpu, BlurPipelines};
+pub use color::rgba_to_lab_gpu;
 pub use context::Context;
 pub use error::{Error, Result};
 pub use pipeline::ComputePipeline;

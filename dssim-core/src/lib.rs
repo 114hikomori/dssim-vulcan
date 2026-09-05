@@ -19,6 +19,9 @@ mod image;
 #[cfg(not(feature = "threads"))]
 mod lieon;
 mod linear;
+#[cfg(feature = "gpu-reference")]
+pub mod tolab;
+#[cfg(not(feature = "gpu-reference"))]
 mod tolab;
 mod val;
 

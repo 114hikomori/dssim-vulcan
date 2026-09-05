@@ -22,6 +22,9 @@ use crate::context::Context;
 use crate::ssim::{ssim_combine_pipelines, SsimPipelines};
 use crate::Result;
 
+// `Downsample` is trait-scoped on dssim-core's image types.
+use dssim_core::Downsample as _;
+
 /// Pooling weights, transcribed from dssim.rs:85 (`DEFAULT_WEIGHTS`).
 pub const DEFAULT_WEIGHTS: [f64; 5] = [0.028, 0.197, 0.322, 0.298, 0.155];
 
@@ -58,36 +61,50 @@ impl GpuSsim {
         Ok(Self { context, blur, ssim })
     }
 
-    /// Materialize all pyramid scales of one image: per scale, CPU Lab
+    /// Materialize all pyramid scales of one image: per scale, GPU Lab
     /// conversion + GPU statistics, then CPU 2×2 downsample for the next.
     ///
     /// Scale-count semantics replicate dssim-core exactly: one scale per
     /// weight (plus the one the CPU generates but never uses — it is dropped
     /// by the weight zip in `compare_inner`, so it is simply not generated
     /// here), stopping when `Downsample` returns None (w<8 || h<8).
-    pub fn create_image<B>(&self, src: &B) -> Result<GpuSsimImage>
-    where
-        B: dssim_core::ToLABBitmap + dssim_core::Downsample<Output = B> + Send + Sync + Clone,
-    {
+    pub fn create_image(&self, src: &ImgVec<dssim_core::RGBAPLU>) -> Result<GpuSsimImage> {
         let mut scales: Vec<ScaleData> = Vec::new();
-        let mut current: Option<B> = Some(src.clone());
+        let mut current: Option<ImgVec<dssim_core::RGBAPLU>> = Some(src.clone());
 
         for _ in 0..DEFAULT_WEIGHTS.len() {
             let img = match current.take() {
                 Some(img) => img,
                 None => break,
             };
-            let lab = img.to_lab();
-            let (w, h) = (lab[0].width(), lab[0].height());
-            let stats = self.scale_statistics(&lab)?;
-            scales.push(ScaleData {
-                width: w,
-                height: h,
-                channels: lab.len(),
-                img: stats.img,
-                mu: stats.mu,
-                sq_blur: stats.sq_blur,
-            });
+            let (w, h) = (img.width(), img.height());
+            let mut inter = Vec::with_capacity(w * h * 4);
+            for px in img.pixels() {
+                inter.extend_from_slice(&[px.r, px.g, px.b, px.a]);
+            }
+            let planes = crate::color::rgba_to_lab_gpu(&self.context, &inter, w, h, 3)?;
+            scales.push(self.make_scale(&planes, w, h, 3)?);
+            current = img.downsample();
+        }
+
+        Ok(GpuSsimImage { scales })
+    }
+
+    /// Gray (1-channel) variant: linear-light f32 planes, matching
+    /// `GBitmap::to_lab` (the ×1.16 branch).
+    pub fn create_image_gray(&self, src: &ImgVec<f32>) -> Result<GpuSsimImage> {
+        let mut scales: Vec<ScaleData> = Vec::new();
+        let mut current: Option<ImgVec<f32>> = Some(src.clone());
+
+        for _ in 0..DEFAULT_WEIGHTS.len() {
+            let img = match current.take() {
+                Some(img) => img,
+                None => break,
+            };
+            let (w, h) = (img.width(), img.height());
+            let input: Vec<f32> = img.pixels().collect();
+            let planes = crate::color::rgba_to_lab_gpu(&self.context, &input, w, h, 1)?;
+            scales.push(self.make_scale(&planes, w, h, 1)?);
             current = img.downsample();
         }
 
@@ -97,16 +114,14 @@ impl GpuSsim {
     /// GPU statistics for one scale's Lab planes, replicating
     /// `DssimChan::preprocess` (dssim.rs:118-139): chroma pre-blur in place
     /// (luma untouched), then mu = blur(img), sq_blur = blur_mul(img, img).
-    fn scale_statistics(&self, lab: &[ImgVec<f32>]) -> Result<ScaleStats> {
-        let mut img_all = Vec::new();
-        let mut mu_all = Vec::new();
-        let mut sq_all = Vec::new();
-        for (n, plane) in lab.iter().enumerate() {
-            let (w, h) = (plane.width(), plane.height());
-            // Lab planes from rgb_to_lab / GBitmap::to_lab are tightly packed.
-            let mut data: Vec<f32> = plane.pixels().collect();
-
-            if n > 0 {
+    fn make_scale(&self, planes: &[f32], w: usize, h: usize, channels: usize) -> Result<ScaleData> {
+        let pixels = w * h;
+        let mut img_all = Vec::with_capacity(pixels * channels);
+        let mut mu_all = Vec::with_capacity(pixels * channels);
+        let mut sq_all = Vec::with_capacity(pixels * channels);
+        for c in 0..channels {
+            let mut data = planes[c * pixels..(c + 1) * pixels].to_vec();
+            if c > 0 {
                 // Chroma pre-blur: the CPU mutates img in place via
                 // blur_in_place; blur() is arithmetically identical
                 // (blur.rs tests assert src2 == dst), so overwrite.
@@ -118,7 +133,14 @@ impl GpuSsim {
             mu_all.extend(mu);
             sq_all.extend(sq);
         }
-        Ok(ScaleStats { img: img_all, mu: mu_all, sq_blur: sq_all })
+        Ok(ScaleData {
+            width: w,
+            height: h,
+            channels,
+            img: img_all,
+            mu: mu_all,
+            sq_blur: sq_all,
+        })
     }
 
     /// Compare a reference image with a modified one; returns the final
@@ -182,12 +204,6 @@ struct ScaleData {
     width: usize,
     height: usize,
     channels: usize,
-}
-
-struct ScaleStats {
-    img: Vec<f32>,
-    mu: Vec<f32>,
-    sq_blur: Vec<f32>,
 }
 
 /// A GPU-processed image — analog of `dssim_core::DssimImage`.

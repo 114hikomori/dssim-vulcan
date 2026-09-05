@@ -1,0 +1,119 @@
+#version 450
+// RGBA(pre-multiplied linear) -> Lab planes — exact transcription of
+// dssim-core tolab.rs: to_rgb()'s alpha dither (image.rs:160-180),
+// fma_matrix's XYZ rows with D65 coefficients, the piecewise cbrt_poly
+// (polynomial + 2x Halley), the 1.05 / 86.2/220 / 107.9/220 output fudges,
+// and the gray (GBitmap) branch's *1.16 form.
+//
+// All constants arrive via push constants, computed by the very same Rust
+// expressions (dssim_core::tolab::LAB_GPU_CONSTANTS) — the shader never
+// re-derives one. `precise` (NoContraction) keeps CPU rounding semantics;
+// the explicit fma() calls mirror the CPU's explicit mul_add sites.
+//
+// Push constant layout (112 bytes):
+//   dims : uvec4 (width, height, channels(1|3), 0)
+//   kX   : vec4  (0.4124/D65x, 0.3576/D65x, 0.1805/D65x, 0)
+//   kY   : vec4  (0.2126/D65y, 0.7152/D65y, 0.0722/D65y, 0)
+//   kZ   : vec4  (0.0193/D65z, 0.1192/D65z, 0.9505/D65z, 0)
+//   kC   : vec4  (K, EPSILON, 16/116, 1.05)
+//   kA   : vec4  (500/220, 86.2/220, 200/220, 107.9/220)
+//   kG   : vec4  (K*1.16, 0, 0, 0)
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer InRgba {
+    float in_rgba[];   // 3ch: 4 floats/pixel (r,g,b,a premul linear); 1ch: 1 float/pixel
+};
+layout(std430, set = 0, binding = 1) writeonly buffer OutLab {
+    float out_lab[];   // channels planes, tightly packed
+};
+
+layout(push_constant) uniform PC {
+    uvec4 dims;
+    vec4 kX;
+    vec4 kY;
+    vec4 kZ;
+    vec4 kC;
+    vec4 kA;
+    vec4 kG;
+} pc;
+
+// tolab.rs cbrt_poly: polynomial seed + 2x Halley refinement.
+// (NoContraction on the in/out edges comes from the `precise` locals at the
+// call sites; the fma() calls are explicit CPU mul_add transcriptions.)
+float cbrt_poly(float x) {
+    // poly[2].mul_add(x, poly[1]).mul_add(x, poly[0]) with poly = [0.2, 1.51, -0.5]
+    precise float y = fma(x, -0.5, 1.51);
+    y = fma(x, y, 0.2);
+
+    // 2x Halley: y = y * 2.0f32.mul_add(x, y3) / 2.0f32.mul_add(y3, x)
+    precise float y3 = (y * y) * y;
+    y = (y * fma(2.0, x, y3)) / fma(2.0, y3, x);
+    y3 = (y * y) * y;
+    y = (y * fma(2.0, x, y3)) / fma(2.0, y3, x);
+    return y;
+}
+
+void main() {
+    uint w = pc.dims.x;
+    uint h = pc.dims.y;
+    uint channels = pc.dims.z;
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= w * h) {
+        return;
+    }
+    uint y = idx / w;
+    uint x = idx % w;
+    uint p = y * w + x;
+    uint pixels = w * h;
+
+    precise float l;
+    precise float a_out = 0.0;
+    precise float b_out = 0.0;
+
+    if (channels == 3u) {
+        // to_rgb (image.rs): un-premultiply dither on the premultiplied
+        // linear values. `a < 255.0` is the CPU's literal check — always
+        // true for unit alpha — replicated verbatim; opaque pixels add 0.
+        float r = in_rgba[p * 4u + 0u];
+        float g = in_rgba[p * 4u + 1u];
+        float b = in_rgba[p * 4u + 2u];
+        float a = in_rgba[p * 4u + 3u];
+
+        uint n = (x + 11u) ^ (y + 11u);
+        if (a < 255.0) {
+            if ((n & 16u) != 0u) { r += 1.0 - a; }
+            if ((n & 8u)  != 0u) { g += 1.0 - a; }
+            if ((n & 32u) != 0u) { b += 1.0 - a; }
+        }
+
+        // fma_matrix rows: b.mul_add(bx, g.mul_add(gx, r * rx))
+        precise float fx = fma(b, pc.kX.z, fma(g, pc.kX.y, r * pc.kX.x));
+        precise float fy = fma(b, pc.kY.z, fma(g, pc.kY.y, r * pc.kY.x));
+        precise float fz = fma(b, pc.kZ.z, fma(g, pc.kZ.y, r * pc.kZ.x));
+
+        // Piecewise cube root: fx > EPSILON ? cbrt_poly(fx) - 16/116 : K*fx
+        precise float X = (fx > pc.kC.y) ? cbrt_poly(fx) - pc.kC.z : pc.kC.x * fx;
+        precise float Y = (fy > pc.kC.y) ? cbrt_poly(fy) - pc.kC.z : pc.kC.x * fy;
+        precise float Z = (fz > pc.kC.y) ? cbrt_poly(fz) - pc.kC.z : pc.kC.x * fz;
+
+        // Output fudges (tolab.rs:40-42).
+        l     = Y * pc.kC.w;
+        a_out = fma(pc.kA.x, X - Y, pc.kA.y);
+        b_out = fma(pc.kA.z, Y - Z, pc.kA.w);
+    } else {
+        // GBitmap::to_lab (gray): f(fy) = fy > EPSILON
+        //   ? (cbrt_poly(fy) - 16/116) * 1.16
+        //   : (K * 1.16) * fy
+        precise float fy = in_rgba[p];
+        l = (fy > pc.kC.y)
+            ? (cbrt_poly(fy) - pc.kC.z) * 1.16
+            : pc.kG.x * fy;
+    }
+
+    out_lab[0u * pixels + p] = l;
+    if (channels == 3u) {
+        out_lab[1u * pixels + p] = a_out;
+        out_lab[2u * pixels + p] = b_out;
+    }
+}

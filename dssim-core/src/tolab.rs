@@ -26,6 +26,31 @@ fn fma_matrix(r: f32, rx: f32, g: f32, gx: f32, b: f32, bx: f32) -> f32 {
 const EPSILON: f32 = 216. / 24389.;
 const K: f32 = 24389. / (27. * 116.); // http://www.brucelindbloom.com/LContinuity.html
 
+/// GPU push-constant constants for the `rgba_to_lab` shader, in shader order
+/// (gpu-reference feature). Every expression is copied verbatim from the
+/// conversion code in this file, so the GPU receives the bit-identical f32
+/// values these same Rust expressions produce — the shader never re-derives
+/// a constant.
+#[cfg(feature = "gpu-reference")]
+pub const LAB_GPU_CONSTANTS: [f32; 18] = [
+    // XYZ matrix coefficients, fma_matrix argument order (rx, gx, bx) per row
+    0.4124 / D65x, 0.3576 / D65x, 0.1805 / D65x, // X row
+    0.2126 / D65y, 0.7152 / D65y, 0.0722 / D65y, // Y row
+    0.0193 / D65z, 0.1192 / D65z, 0.9505 / D65z, // Z row
+    K,
+    EPSILON,
+    16. / 116.,
+    // Output scaling: L' = Y * 1.05; a' = fma(500/220, X-Y, 86.2/220);
+    // b' = fma(200/220, Y-Z, 107.9/220)
+    1.05,
+    500.0 / 220.0,
+    86.2 / 220.0,
+    200.0 / 220.0,
+    107.9 / 220.0,
+    // Gray branch (GBitmap::to_lab): (K * 1.16) * fy
+    K * 1.16,
+];
+
 impl ToLAB for RGBLU {
     fn to_lab(&self) -> (f32, f32, f32) {
         let fx = fma_matrix(self.r, 0.4124 / D65x, self.g, 0.3576 / D65x, self.b, 0.1805 / D65x);
