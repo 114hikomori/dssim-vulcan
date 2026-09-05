@@ -1,0 +1,72 @@
+#version 450
+// SSIM combine, 1-channel — exact transcription of dssim.rs compare_scale
+// (lines 397-436, the scalar L=f32 path for gray inputs): no inv3, fma at
+// the same two designated sites.
+//
+// Push constant layout (56 bytes, mirrors BlurPC):
+//   dims : uvec4 (width, height, 0, 0)
+//   dims2: uvec4 (dst_stride, 0, 0, 0)
+//   k    : vec4  (c1 = 0.01*0.01, c2 = 0.03*0.03, unused, unused)
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer MuO {
+    float mu1_data[];
+};
+layout(std430, set = 0, binding = 1) readonly buffer MuM {
+    float mu2_data[];
+};
+layout(std430, set = 0, binding = 2) readonly buffer SqO {
+    float sq1_data[];
+};
+layout(std430, set = 0, binding = 3) readonly buffer SqM {
+    float sq2_data[];
+};
+layout(std430, set = 0, binding = 4) readonly buffer Cross {
+    float cross_data[];
+};
+layout(std430, set = 0, binding = 5) writeonly buffer Dst {
+    float dst_data[];
+};
+
+layout(push_constant) uniform PC {
+    uvec4 dims;
+    uvec4 dims2;
+    vec4 k;
+} pc;
+
+void main() {
+    uint w = pc.dims.x;
+    uint h = pc.dims.y;
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= w * h) {
+        return;
+    }
+    uint y = idx / w;
+    uint x = idx % w;
+    uint dst_row = y * pc.dims2.x;
+    uint p = y * w + x;
+
+    // `precise` (NoContraction) matches the CPU's separate roundings — see
+    // ssim_combine_3ch.comp for why this is load-bearing.
+    precise float mu1 = mu1_data[p];
+    precise float mu2 = mu2_data[p];
+    precise float mu1mu1 = mu1 * mu1;
+    precise float mu1mu2 = mu1 * mu2;
+    precise float mu2mu2 = mu2 * mu2;
+    precise float mu1_sq = mu1mu1;
+    precise float mu2_sq = mu2mu2;
+    precise float mu1_mu2 = mu1mu2;
+    precise float sigma1_sq = sq1_data[p] - mu1mu1;
+    precise float sigma2_sq = sq2_data[p] - mu2mu2;
+    precise float sigma12 = cross_data[p] - mu1mu2;
+
+    precise float c1 = pc.k.x;
+    precise float c2 = pc.k.y;
+    // The two designated fma sites, matching dssim.rs:431-432.
+    precise float numer = fma(2.0, mu1_mu2, c1) * fma(2.0, sigma12, c2);
+    precise float denom = (mu1_sq + mu2_sq + c1) * (sigma1_sq + sigma2_sq + c2);
+    // Exact-quotient select for the identity case — see ssim_combine_3ch.
+    precise float result = (numer == denom) ? 1.0 : numer / denom;
+    dst_data[dst_row + x] = result;
+}

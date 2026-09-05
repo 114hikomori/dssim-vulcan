@@ -1,0 +1,112 @@
+#version 450
+// SSIM combine, 3-channel — exact transcription of dssim.rs
+// compare_scale_3ch (lines 335-395): per-pixel f32 arithmetic with mul_add
+// (fma) at exactly the two designated sites, and 1/3 as an inv3 multiply.
+//
+// Role buffers hold concatenated planes (plane stride = width), channel
+// order matching to_lab(): L, a, b.
+//   mu_o / mu_m : 3 planes each (original / modified)
+//   sq_o / sq_m : 3 planes each (img_sq_blur of original / modified)
+//   cross       : 3 planes (img1_img2_blur)
+//
+// Push constant layout (56 bytes, mirrors BlurPC):
+//   dims : uvec4 (width, height, 0, 0)
+//   dims2: uvec4 (dst_stride, 0, 0, 0)
+//   k    : vec4  (c1 = 0.01*0.01, c2 = 0.03*0.03, inv3 = 1.0/3.0, unused)
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer MuO {
+    float mu1_data[];     // 3 planes: L, a, b
+};
+layout(std430, set = 0, binding = 1) readonly buffer MuM {
+    float mu2_data[];     // 3 planes: L, a, b
+};
+layout(std430, set = 0, binding = 2) readonly buffer SqO {
+    float sq1_data[];     // 3 planes: L, a, b
+};
+layout(std430, set = 0, binding = 3) readonly buffer SqM {
+    float sq2_data[];     // 3 planes: L, a, b
+};
+layout(std430, set = 0, binding = 4) readonly buffer Cross {
+    float cross_data[];   // 3 planes: L, a, b
+};
+layout(std430, set = 0, binding = 5) writeonly buffer Dst {
+    float dst_data[];
+};
+
+layout(push_constant) uniform PC {
+    uvec4 dims;
+    uvec4 dims2;
+    vec4 k;
+} pc;
+
+void main() {
+    uint w = pc.dims.x;
+    uint h = pc.dims.y;
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= w * h) {
+        return;
+    }
+    uint y = idx / w;
+    uint x = idx % w;
+    uint plane = w * h;
+    uint dst_row = y * pc.dims2.x;
+    uint p = y * w + x;
+
+    float mu1_0 = mu1_data[0u * plane + p];
+    float mu1_1 = mu1_data[1u * plane + p];
+    float mu1_2 = mu1_data[2u * plane + p];
+    float mu2_0 = mu2_data[0u * plane + p];
+    float mu2_1 = mu2_data[1u * plane + p];
+    float mu2_2 = mu2_data[2u * plane + p];
+
+    // `precise` (SPIR-V NoContraction) is load-bearing: without it the
+    // compiler fuses `x - mu*mu` into fma(-mu, mu, x), and the catastrophic
+    // cancellation in the sigma terms amplifies the extra rounding past the
+    // 2e-6 parity bound. The CPU rounds every op separately (except the two
+    // explicit mul_add sites), so every op here must round separately too.
+    precise float mu1mu1_0 = mu1_0 * mu1_0;
+    precise float mu1mu1_1 = mu1_1 * mu1_1;
+    precise float mu1mu1_2 = mu1_2 * mu1_2;
+    precise float mu2mu2_0 = mu2_0 * mu2_0;
+    precise float mu2mu2_1 = mu2_1 * mu2_1;
+    precise float mu2mu2_2 = mu2_2 * mu2_2;
+    precise float mu1mu2_0 = mu1_0 * mu2_0;
+    precise float mu1mu2_1 = mu1_1 * mu2_1;
+    precise float mu1mu2_2 = mu1_2 * mu2_2;
+
+    precise float inv3 = pc.k.z;
+    precise float mu1_sq  = (mu1mu1_0 + mu1mu1_1 + mu1mu1_2) * inv3;
+    precise float mu2_sq  = (mu2mu2_0 + mu2mu2_1 + mu2mu2_2) * inv3;
+    precise float mu1_mu2 = (mu1mu2_0 + mu1mu2_1 + mu1mu2_2) * inv3;
+
+    float o0 = sq1_data[0u * plane + p];
+    float o1 = sq1_data[1u * plane + p];
+    float o2 = sq1_data[2u * plane + p];
+    float m0 = sq2_data[0u * plane + p];
+    float m1 = sq2_data[1u * plane + p];
+    float m2 = sq2_data[2u * plane + p];
+
+    precise float sigma1_sq = ((o0 - mu1mu1_0) + (o1 - mu1mu1_1) + (o2 - mu1mu1_2)) * inv3;
+    precise float sigma2_sq = ((m0 - mu2mu2_0) + (m1 - mu2mu2_1) + (m2 - mu2mu2_2)) * inv3;
+    precise float sigma12 = ((cross_data[0u * plane + p] - mu1mu2_0)
+                           + (cross_data[1u * plane + p] - mu1mu2_1)
+                           + (cross_data[2u * plane + p] - mu1mu2_2)) * inv3;
+
+    // The two designated fma sites, exactly as dssim.rs:390-391:
+    // 2.0f32.mul_add(mu1_mu2, c1) * 2.0f32.mul_add(sigma12, c2)
+    // GLSL fma() is an explicit single-rounding fused multiply-add, matching
+    // Rust's mul_add — explicit intrinsics are unaffected by `precise`.
+    precise float c1 = pc.k.x;
+    precise float c2 = pc.k.y;
+    precise float numer = fma(2.0, mu1_mu2, c1) * fma(2.0, sigma12, c2);
+
+    precise float denom = (mu1_sq + mu2_sq + c1) * (sigma1_sq + sigma2_sq + c2);
+    // Vulkan permits FDiv up to 2.5 ulp; the CPU's division is correctly
+    // rounded. For the identity case (identical images) numerator and
+    // denominator are bitwise equal and the exact quotient is 1.0, which the
+    // identity test locks to exact — so select it instead of dividing.
+    precise float result = (numer == denom) ? 1.0 : numer / denom;
+    dst_data[dst_row + x] = result;
+}
