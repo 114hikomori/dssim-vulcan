@@ -277,9 +277,14 @@ Milestone ids refer to `dssim-vulkan-fable-plan.md` §16 (also listed in `AGENTS
   (NoContraction) — compiler FMA fusion rounded differently from CPU, and the
   SSIM sigma cancellation amplified 1-ulp blur drift ~5e4x on tiny low-contrast
   patches (17x9 score diff 6.5e-6 > 5e-6). Fixed with precise on all 15 blur
-  accumulation sites (NoContraction x31 verified); 17x9 now <= 5e-6 on both GPUs.
+  accumulation sites; SPIR-V NoContraction went 0 -> 31 (pre-fix blob at
+  1dabf06 measured 0 via spirv-dis, post-fix blob measures 31), and 17x9 is
+  now <= 5e-6 on both GPUs, bit-identical across 3 consecutive runs.
   TWINS: searched missing-precise accumulations across dssim-vulkan shaders -
   the 3 blur shaders only (Lab/SSIM shaders had it since M3/M5).
+  Note: an initial re-audit wrongly compared HEAD~1 vs HEAD (both post-fix)
+  and concluded NoContraction was already present; the correct pre-fix
+  baseline is HEAD~2 (1dabf06), which measures 0.
 - Deviation found & fixed (cosmetic but real): blur_h5.comp had been a
   3-shader concatenation since Phase C (PowerShell Set-Content collision); h5.spv
   compiled from it still worked (entry point survived). Restored h5-only source,
