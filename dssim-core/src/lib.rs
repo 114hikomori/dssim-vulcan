@@ -5,6 +5,9 @@
 #![allow(clippy::manual_range_contains)]
 #![allow(clippy::new_without_default)]
 
+#[cfg(feature = "gpu-reference")]
+pub mod blur;
+#[cfg(not(feature = "gpu-reference"))]
 mod blur;
 mod c_api;
 mod dssim;

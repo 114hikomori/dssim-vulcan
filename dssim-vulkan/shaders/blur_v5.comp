@@ -1,0 +1,74 @@
+#version 450
+// Vertical 5-tap blur pass — exact transcription of blur.rs blur_v5,
+// same 4-case boundary structure (y=0 / y=h-1 edges, y=1 / y=h-2
+// near-edges, interior). src must be tightly packed (stride == width),
+// matching the CPU contract.
+//
+// Push constant layout (48 bytes):
+//   dims : uvec4  (width, height, 0, 0)
+//   dims2: uvec4  (dst_stride, 0, 0, 0)
+//   k1   : vec4   (K5_OUTER, K5_INNER, K5_MID, K5_EDGE_CENTER)
+//   k2   : vec2   (K5_EDGE_NEAR, K5_EDGE_FAR)
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer Src {
+    float src_data[];
+};
+layout(std430, set = 0, binding = 1) writeonly buffer Dst {
+    float dst_data[];
+};
+
+layout(push_constant) uniform PC {
+    uvec4 dims;
+    uvec4 dims2;
+    vec4 k1;
+    vec2 k2;
+} pc;
+
+void main() {
+    uint w = pc.dims.x;
+    uint h = pc.dims.y;
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= w * h) {
+        return;
+    }
+    uint y = idx / w;
+    uint x = idx % w;
+    uint last_y = h - 1u;
+    uint dst_row = y * pc.dims2.x;
+
+    if (y == 0u) {
+        float r0 = src_data[0u * w + x];
+        float r1 = src_data[min(1u, last_y) * w + x];
+        float r2 = src_data[min(2u, last_y) * w + x];
+        dst_data[dst_row + x] = pc.k1.w * r0 + pc.k2.x * r1 + pc.k2.y * r2;
+    } else if (y == last_y && h >= 2u) {
+        float rl = src_data[last_y * w + x];
+        float rl1 = src_data[(last_y - 1u) * w + x];
+        float rl2 = src_data[(last_y >= 2u ? last_y - 2u : 0u) * w + x];
+        dst_data[dst_row + x] = pc.k2.y * rl2 + pc.k2.x * rl1 + pc.k1.w * rl;
+    } else if (y == 1u && h >= 3u) {
+        float rm = src_data[0u * w + x];
+        float rc = src_data[1u * w + x];
+        float rp1 = src_data[min(2u, last_y) * w + x];
+        float rp2 = src_data[min(3u, last_y) * w + x];
+        // m2 and m1 both clamp to row 0.
+        dst_data[dst_row + x] = (rm + rp2) * pc.k1.x + (rm + rp1) * pc.k1.y + rc * pc.k1.z;
+    } else if (y == last_y - 1u && h >= 4u) {
+        uint yy = last_y - 1u;
+        float rm2 = src_data[(yy - 2u) * w + x];
+        float rm1 = src_data[(yy - 1u) * w + x];
+        float rc = src_data[yy * w + x];
+        float rp1 = src_data[(yy + 1u) * w + x];
+        float rp2 = src_data[min(yy + 2u, last_y) * w + x];
+        dst_data[dst_row + x] = (rm2 + rp2) * pc.k1.x + (rm1 + rp1) * pc.k1.y + rc * pc.k1.z;
+    } else {
+        float rm2 = src_data[(y - 2u) * w + x];
+        float rm1 = src_data[(y - 1u) * w + x];
+        float rc = src_data[y * w + x];
+        float rp1 = src_data[(y + 1u) * w + x];
+        float rp2 = src_data[(y + 2u) * w + x];
+        dst_data[dst_row + x] = (rm2 + rp2) * pc.k1.x + (rm1 + rp1) * pc.k1.y + rc * pc.k1.z;
+    }
+}

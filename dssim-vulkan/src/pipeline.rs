@@ -140,8 +140,21 @@ impl ComputePipeline {
         count: u32,
         push_constants: &[u8],
     ) -> Result<()> {
+        let pass = Pass {
+            pipeline: self,
+            buffers: buffers.to_vec(),
+            push: push_constants.to_vec(),
+            groups: count.div_ceil(64),
+        };
+        dispatch_sequence(&self.context, &[pass])
+    }
+
+    /// Record one bound-and-dispatched pass into an open command buffer.
+    /// The descriptor set is allocated from this pipeline's pool and freed
+    /// by the pool reset in [`dispatch_sequence`].
+    fn record_pass(&self, cb: vk::CommandBuffer, buffers: &[&Buffer], push: &[u8], groups: u32) -> Result<()> {
         assert_eq!(buffers.len() as u32, self.binding_count, "buffer count must match binding count");
-        if push_constants.len() as u32 > self.push_constant_size {
+        if push.len() as u32 > self.push_constant_size {
             return Err(Error::Shader("push constant overflow".into()));
         }
         unsafe {
@@ -170,56 +183,93 @@ impl ComputePipeline {
                 .buffer_info(&buffer_infos)];
             device.update_descriptor_sets(&writes, &[]);
 
-            let pcs: &[u8] = push_constants;
-            let pc_ptr = pcs.as_ptr().cast();
-            self.context.submit_one_shot(|cb| {
-                device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::COMPUTE, self.pipeline);
-                device.cmd_bind_descriptor_sets(
+            device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::COMPUTE, self.pipeline);
+            device.cmd_bind_descriptor_sets(
+                cb,
+                vk::PipelineBindPoint::COMPUTE,
+                self.pipeline_layout,
+                0,
+                std::slice::from_ref(&set),
+                &[],
+            );
+            if !push.is_empty() {
+                device.cmd_push_constants(
                     cb,
-                    vk::PipelineBindPoint::COMPUTE,
                     self.pipeline_layout,
+                    vk::ShaderStageFlags::COMPUTE,
                     0,
-                    std::slice::from_ref(&set),
-                    &[],
+                    push,
                 );
-                if !pcs.is_empty() {
-                    device.cmd_push_constants(
-                        cb,
-                        self.pipeline_layout,
-                        vk::ShaderStageFlags::COMPUTE,
-                        0,
-                        std::slice::from_raw_parts(pc_ptr, pcs.len()),
-                    );
-                }
-                let groups = count.div_ceil(64);
-                device.cmd_dispatch(cb, groups, 1, 1);
-                // Shader writes -> later reads (transfer/HOST).
-                device.cmd_pipeline_barrier(
-                    cb,
-                    vk::PipelineStageFlags::COMPUTE_SHADER,
-                    vk::PipelineStageFlags::TRANSFER | vk::PipelineStageFlags::HOST,
-                    vk::DependencyFlags::empty(),
-                    &[],
-                    &buffers
-                        .iter()
-                        .map(|b| {
-                            buffer_barrier(
-                                b.buffer,
-                                b.size,
-                                vk::AccessFlags::SHADER_WRITE,
-                                vk::AccessFlags::TRANSFER_READ | vk::AccessFlags::HOST_READ,
-                            )
-                        })
-                        .collect::<Vec<_>>(),
-                    &[],
-                );
-            })?;
+            }
+            device.cmd_dispatch(cb, groups, 1, 1);
+        }
+        Ok(())
+    }
+}
 
-            device.reset_descriptor_pool(self.descriptor_pool, vk::DescriptorPoolResetFlags::empty())
+/// One pipeline pass inside a [`dispatch_sequence`].
+pub struct Pass<'a> {
+    pub pipeline: &'a ComputePipeline,
+    pub buffers: Vec<&'a Buffer>,
+    pub push: Vec<u8>,
+    pub groups: u32,
+}
+
+/// Record all passes into ONE command buffer (barriers between passes keep
+/// writes visible to the next pass), submit, and wait for the fence.
+/// Determinism-over-speed: no overlap, no pipelining.
+pub fn dispatch_sequence(context: &Arc<Context>, passes: &[Pass<'_>]) -> Result<()> {
+    struct ResetPool<'a>(&'a ComputePipeline);
+    let mut used_pipelines: Vec<ResetPool<'_>> = Vec::new();
+
+    context.submit_one_shot(|cb| unsafe {
+        let device = &context.device;
+        for pass in passes {
+            if !used_pipelines.iter().any(|ResetPool(p)| std::ptr::eq(*p, pass.pipeline)) {
+                used_pipelines.push(ResetPool(pass.pipeline));
+            }
+            pass.pipeline.record_pass(cb, &pass.buffers, &pass.push, pass.groups)?;
+            // Shader writes -> later reads (next pass / transfer / HOST).
+            let barriers: Vec<vk::BufferMemoryBarrier<'_>> = pass
+                .buffers
+                .iter()
+                .map(|b| {
+                    buffer_barrier(
+                        b.buffer,
+                        b.size,
+                        vk::AccessFlags::SHADER_WRITE,
+                        vk::AccessFlags::SHADER_READ
+                            | vk::AccessFlags::TRANSFER_READ
+                            | vk::AccessFlags::HOST_READ,
+                    )
+                })
+                .collect();
+            device.cmd_pipeline_barrier(
+                cb,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::PipelineStageFlags::COMPUTE_SHADER
+                    | vk::PipelineStageFlags::TRANSFER
+                    | vk::PipelineStageFlags::HOST,
+                vk::DependencyFlags::empty(),
+                &[],
+                &barriers,
+                &[],
+            );
+        }
+        Ok(())
+    })?;
+
+    // Descriptor sets were consumed; recycle the pools.
+    for ResetPool(pipeline) in &used_pipelines {
+        unsafe {
+            pipeline
+                .context
+                .device
+                .reset_descriptor_pool(pipeline.descriptor_pool, vk::DescriptorPoolResetFlags::empty())
                 .map_err(Error::Vulkan)?;
-            Ok(())
         }
     }
+    Ok(())
 }
 
 impl Drop for ComputePipeline {

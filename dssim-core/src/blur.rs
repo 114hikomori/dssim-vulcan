@@ -28,6 +28,21 @@ const K5_EDGE_CENTER: f32 = K5_MID + K5_INNER;
 const K5_EDGE_NEAR: f32 = K5_OUTER + K5_INNER;
 const K5_EDGE_FAR: f32 = K5_OUTER;
 
+/// The blur kernel constants, in GPU push-constant order
+/// `[K5_OUTER, K5_INNER, K5_MID, K5_EDGE_CENTER, K5_EDGE_NEAR, K5_EDGE_FAR]`.
+/// Exposed under `gpu-reference` so the Vulkan shaders receive the exact
+/// same f32 values computed by these same Rust expressions — the shader
+/// never re-derives them.
+#[cfg(feature = "gpu-reference")]
+pub const K5_REF: [f32; 6] = [
+    K5_OUTER,
+    K5_INNER,
+    K5_MID,
+    K5_EDGE_CENTER,
+    K5_EDGE_NEAR,
+    K5_EDGE_FAR,
+];
+
 mod portable {
     use super::{K5_EDGE_CENTER, K5_EDGE_FAR, K5_EDGE_NEAR, K5_INNER, K5_MID, K5_OUTER};
     use imgref::*;

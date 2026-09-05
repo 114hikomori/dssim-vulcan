@@ -282,8 +282,11 @@ name = "dssim-vulkan"
 version = "0.1.0"
 dependencies = [
  "ash",
+ "dssim-core",
  "env_logger",
  "gpu-allocator",
+ "imgref",
+ "lodepng",
 ]
 
 [[package]]

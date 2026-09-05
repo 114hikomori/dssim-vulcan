@@ -141,6 +141,7 @@ impl Context {
                 ],
                 &[],
             );
+            Ok(())
         })?;
 
         Ok(dst)
@@ -178,6 +179,7 @@ impl Context {
                 ],
                 &[],
             );
+            Ok(())
         })?;
 
         read_bytes(&readback, src.size as usize)

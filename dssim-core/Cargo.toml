@@ -31,6 +31,9 @@ threads = ["dep:rayon"]
 # Test-only intermediate-dump instrumentation for the Vulkan port (M0 ground
 # truth harness). Adds a dump sink and cfg'd hooks; no public API change.
 dssim-dumps = []
+# Expose the blur kernels and their constants for GPU-parity tests
+# (dssim-vulkan dev-dependency). One implementation, two callers.
+gpu-reference = []
 # obsolete
 no-macos-vimage = []
 # internal for cargo-c only

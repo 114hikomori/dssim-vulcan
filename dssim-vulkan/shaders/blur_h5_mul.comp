@@ -1,0 +1,79 @@
+#version 450
+// Horizontal 5-tap blur pass with fused element-wise multiply — exact
+// transcription of blur.rs blur_h5_mul: same 4-case boundary handling,
+// applied to q[i] = src1[i] * src2[i]. Weights via push constants.
+//
+// Push constant layout (48 bytes):
+//   dims : uvec4  (width, height, src1_stride, src2_stride)
+//   dims2: uvec4  (dst_stride, 0, 0, 0)
+//   k1   : vec4   (K5_OUTER, K5_INNER, K5_MID, K5_EDGE_CENTER)
+//   k2   : vec2   (K5_EDGE_NEAR, K5_EDGE_FAR)
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer Src1 {
+    float src1_data[];
+};
+layout(std430, set = 0, binding = 1) readonly buffer Src2 {
+    float src2_data[];
+};
+layout(std430, set = 0, binding = 2) writeonly buffer Dst {
+    float dst_data[];
+};
+
+layout(push_constant) uniform PC {
+    uvec4 dims;
+    uvec4 dims2;
+    vec4 k1;
+    vec2 k2;
+} pc;
+
+void main() {
+    uint w = pc.dims.x;
+    uint h = pc.dims.y;
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= w * h) {
+        return;
+    }
+    uint y = idx / w;
+    uint x = idx % w;
+    uint last = w - 1u;
+    uint r1 = y * pc.dims.z;
+    uint r2 = y * pc.dims.w;
+    uint dst_row = y * pc.dims2.x;
+
+    if (x == 0u) {
+        float q0 = src1_data[r1 + 0u] * src2_data[r2 + 0u];
+        float q1 = src1_data[r1 + min(1u, last)] * src2_data[r2 + min(1u, last)];
+        float q2 = src1_data[r1 + min(2u, last)] * src2_data[r2 + min(2u, last)];
+        dst_data[dst_row + x] = pc.k1.w * q0 + pc.k2.x * q1 + pc.k2.y * q2;
+    } else if (x == last && w >= 2u) {
+        float ql = src1_data[r1 + last] * src2_data[r2 + last];
+        float ql1 = src1_data[r1 + last - 1u] * src2_data[r2 + last - 1u];
+        float ql2 = src1_data[r1 + (last >= 2u ? last - 2u : 0u)]
+                  * src2_data[r2 + (last >= 2u ? last - 2u : 0u)];
+        dst_data[dst_row + x] = pc.k2.y * ql2 + pc.k2.x * ql1 + pc.k1.w * ql;
+    } else if (x == 1u && w >= 3u) {
+        float m2 = src1_data[r1 + 0u] * src2_data[r2 + 0u];
+        float m1 = m2;
+        float c = src1_data[r1 + 1u] * src2_data[r2 + 1u];
+        float p1n = src1_data[r1 + min(2u, last)] * src2_data[r2 + min(2u, last)];
+        float p2n = src1_data[r1 + min(3u, last)] * src2_data[r2 + min(3u, last)];
+        dst_data[dst_row + x] = (m2 + p2n) * pc.k1.x + (m1 + p1n) * pc.k1.y + c * pc.k1.z;
+    } else if (x == last - 1u && w >= 4u) {
+        uint i = last - 1u;
+        float m2 = src1_data[r1 + i - 2u] * src2_data[r2 + i - 2u];
+        float m1 = src1_data[r1 + i - 1u] * src2_data[r2 + i - 1u];
+        float c = src1_data[r1 + i] * src2_data[r2 + i];
+        float p1n = src1_data[r1 + i + 1u] * src2_data[r2 + i + 1u];
+        float p2n = src1_data[r1 + min(i + 2u, last)] * src2_data[r2 + min(i + 2u, last)];
+        dst_data[dst_row + x] = (m2 + p2n) * pc.k1.x + (m1 + p1n) * pc.k1.y + c * pc.k1.z;
+    } else {
+        float m2 = src1_data[r1 + x - 2u] * src2_data[r2 + x - 2u];
+        float m1 = src1_data[r1 + x - 1u] * src2_data[r2 + x - 1u];
+        float c = src1_data[r1 + x] * src2_data[r2 + x];
+        float p1 = src1_data[r1 + x + 1u] * src2_data[r2 + x + 1u];
+        float p2 = src1_data[r1 + x + 2u] * src2_data[r2 + x + 2u];
+        dst_data[dst_row + x] = (m2 + p2) * pc.k1.x + (m1 + p1) * pc.k1.y + c * pc.k1.z;
+    }
+}

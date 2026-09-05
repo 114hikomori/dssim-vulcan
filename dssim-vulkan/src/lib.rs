@@ -5,11 +5,13 @@
 //! currently Phase B: the minimal runtime (context, allocator, staging
 //! transfers, compute dispatch) proven by the ×2 smoke shader.
 
+pub mod blur;
 pub mod context;
 pub mod error;
 pub mod pipeline;
 pub mod transfer;
 
+pub use blur::{blur_gpu, blur_mul_gpu};
 pub use context::Context;
 pub use error::{Error, Result};
 pub use pipeline::ComputePipeline;

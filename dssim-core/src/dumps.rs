@@ -64,14 +64,14 @@ struct Sink {
     /// collide on file names.
     run_seq: u64,
     /// Dumps recorded before the final scale indexing is known
-    /// (`make_scales_recursive` runs depth-first, largest scale first).
+    /// (`make_scales_recursive` defers input/Lab dumps to the flush point).
     deferred: Vec<Deferred>,
 }
 
 struct Deferred {
     kind: &'static str,
-    /// Recursion depth: 0 = original image, +1 per downsample. Translated to
-    /// the post-reverse scale index by [`flush_deferred`].
+    /// Recursion depth: 0 = original image (= post-reverse scale 0),
+    /// +1 per downsample. See [`flush_deferred`].
     depth: u32,
     channel: u32,
     width: u32,
@@ -115,7 +115,7 @@ pub fn next_run() {
 }
 
 /// Queue a dump whose final scale index is not known yet (recursion runs
-/// depth-first, largest scale first). Flushed by [`flush_deferred`].
+/// depth-first). Flushed by [`flush_deferred`].
 fn defer(kind: &'static str, depth: usize, channel: u32, width: usize, height: usize, data: Vec<f32>) {
     if let Some(sink) = SINK.lock().expect("dumps sink mutex poisoned").as_mut() {
         debug_assert_eq!(data.len(), width * height);
@@ -130,9 +130,11 @@ fn defer(kind: &'static str, depth: usize, channel: u32, width: usize, height: u
     }
 }
 
-/// Write all deferred dumps, translating recursion depth (0 = largest image)
-/// into the post-reverse scale index (0 = smallest scale, as used by the
-/// pooling loop and the `chan_*`/`cross_blur`/`ssim_map` dumps). Called by
+/// Write all deferred dumps, translating recursion depth into the
+/// post-reverse scale index. Scale 0 is the ORIGINAL image
+/// (`DssimImage::width()` returns `scale[0]`'s width — the recursion arm of
+/// `rayon::join` finishes its pushes before the parent's, so pre-reverse
+/// order is deepest-first and reversing puts depth 0 first). Called by
 /// `create_image` once the actual number of generated scales is known.
 #[doc(hidden)]
 pub fn flush_deferred(num_scales: usize) {
@@ -143,8 +145,7 @@ pub fn flush_deferred(num_scales: usize) {
     deferred.sort_by_key(|d| (d.depth, d.channel));
     for d in deferred {
         debug_assert!(d.depth < num_scales as u32, "deferred depth {} out of range ({num_scales} scales)", d.depth);
-        let scale = num_scales as u32 - 1 - d.depth;
-        write_dump(d.kind, scale, d.channel, d.width, d.height, d.width, &d.data);
+        write_dump(d.kind, d.depth, d.channel, d.width, d.height, d.width, &d.data);
     }
 }
 

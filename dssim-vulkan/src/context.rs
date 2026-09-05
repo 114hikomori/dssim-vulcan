@@ -240,9 +240,11 @@ impl Context {
     }
 
     /// Record a one-shot command buffer on the compute queue and wait for it.
+    /// `record` may fail (e.g. descriptor allocation); the error aborts the
+    /// partially-recorded buffer and is returned.
     pub(crate) fn submit_one_shot(
         &self,
-        record: impl FnOnce(vk::CommandBuffer),
+        record: impl FnOnce(vk::CommandBuffer) -> Result<(), Error>,
     ) -> Result<(), Error> {
         unsafe {
             let cb = self
@@ -264,9 +266,16 @@ impl Context {
                 flags: vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT,
                 ..Default::default()
             };
-            self.device.begin_command_buffer(cb, &begin_info).map_err(Error::Vulkan)?;
-            record(cb);
-            self.device.end_command_buffer(cb).map_err(Error::Vulkan)?;
+            let recorded = (|| {
+                self.device.begin_command_buffer(cb, &begin_info).map_err(Error::Vulkan)?;
+                record(cb)?;
+                self.device.end_command_buffer(cb).map_err(Error::Vulkan)
+            })();
+            if let Err(e) = recorded {
+                self.device.destroy_fence(fence, None);
+                self.device.free_command_buffers(self.command_pool, std::slice::from_ref(&cb));
+                return Err(e);
+            }
 
             let submit = vk::SubmitInfo {
                 command_buffer_count: 1,
