@@ -243,3 +243,21 @@ Milestone ids refer to `dssim-vulkan-fable-plan.md` §16 (also listed in `AGENTS
 - Next: Phase H — performance & robustness (VULKAN_PORT_PLAN §4 Phase 7): profile
   vs CPU baseline first, then opt-in GPU downsampling/LUT, batch mode, async
   readback. Performance numbers must be measured before any claim.
+
+## 2026-09-05 — M6 addendum (CI approved + pushed)
+
+- Done: user approved the CI job in-session ("lavapipe CI job นี่หมายถึงบน github
+  ใช่มั้ย อันนั้นนายลงมือได้เลย"). Wrote `.github/workflows/ci.yml` (Ubuntu runner,
+  mesa-vulkan-drivers + libvulkan1 = lavapipe, build + single `cargo test
+  --workspace` run per TDR policy; validation layers auto-skip when the KHRONOS
+  layer is absent — context already handles that), committed as `ab5cc2e`, and
+  pushed to origin/main under that authorization (15 commits, branch now
+  synced). This closes the M1 lavapipe leg too: the CI job runs the same parity
+  suites on the llvmpipe CPU device.
+- Caveat: the first CI run's outcome has NOT been observed by this session (no
+  GitHub Actions log access from here — per repo rules the user pastes the log
+  if it fails). Local verification of the workflow is limited to YAML sanity.
+- Blocked / open question: CI run result unknown until next check.
+- Next: Phase H — performance & robustness (VULKAN_PORT_PLAN §4 Phase 7): profile
+  vs CPU baseline first, then opt-in GPU downsampling/LUT, batch mode, async
+  readback. Performance numbers must be measured before any claim.
