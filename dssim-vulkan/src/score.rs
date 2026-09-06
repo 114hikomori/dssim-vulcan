@@ -117,22 +117,27 @@ impl GpuSsim {
             let (w, h) = (img.width(), img.height());
             let pixels = w * h;
 
-            // Staging: interleaved RGBA written straight into mapped host
-            // memory -- no intermediate Vec<f32>/Vec<u8>, no second memcpy
-            // (this upload dominated small-image create_image cost).
+            // Staging: interleaved RGBA. RGBAPLU is repr(C) [f32;4] in
+            // r,g,b,a order, so the upload is a byte-for-byte copy of the
+            // contiguous pixel buffer -- not a per-pixel iterator loop.
+            // Guarded by the size assert; the parity suites catch any
+            // layout-assumption error immediately.
             let staging = self.context.alloc_buffer(
                 "s.staging",
                 (pixels * 4 * 4) as u64,
                 vk::BufferUsageFlags::TRANSFER_SRC,
                 gpu_allocator::MemoryLocation::CpuToGpu,
             )?;
+            const _: () = assert!(std::mem::size_of::<dssim_core::RGBAPLU>() == 16);
+            let (cow, _, _) = img.as_ref().to_contiguous_buf();
+            let px: &[dssim_core::RGBAPLU] = &cow;
+            let src =
+                unsafe { std::slice::from_raw_parts(px.as_ptr() as *const u8, px.len() * 16) };
             crate::transfer::write_mapped_f32_with(&staging, pixels * 4, |dst| {
-                for (px, chunk) in img.pixels().zip(dst.as_chunks_mut::<4>().0) {
-                    chunk[0] = px.r;
-                    chunk[1] = px.g;
-                    chunk[2] = px.b;
-                    chunk[3] = px.a;
-                }
+                let dstb = unsafe {
+                    std::slice::from_raw_parts_mut(dst.as_mut_ptr() as *mut u8, dst.len() * 4)
+                };
+                dstb.copy_from_slice(src);
             })?;
             let rgba_buf = self.context.alloc_buffer(
                 "s.rgba",
@@ -252,10 +257,11 @@ impl GpuSsim {
                 vk::BufferUsageFlags::TRANSFER_SRC,
                 gpu_allocator::MemoryLocation::CpuToGpu,
             )?;
+            // Gray pixels are already f32, so the upload is a direct slice copy
+            // (no per-pixel iterator), same as the RGB path's byte copy.
+            let (cow, _, _) = img.as_ref().to_contiguous_buf();
             crate::transfer::write_mapped_f32_with(&staging, pixels, |dst| {
-                for (px, d) in img.pixels().zip(dst.iter_mut()) {
-                    *d = px;
-                }
+                dst.copy_from_slice(&cow);
             })?;
             let gray_buf = self.context.alloc_buffer(
                 "g.gray",

@@ -309,3 +309,62 @@ pub(crate) fn read_bytes(buffer: &Buffer, len: usize) -> Result<Vec<u8>> {
     // mapped; the queue finished (fence) before this read.
     Ok(unsafe { std::slice::from_raw_parts(ptr.as_ptr().cast::<u8>(), len) }.to_vec())
 }
+
+#[cfg(test)]
+mod upload_diag {
+    // Diagnostic (run manually -- timing is machine-dependent, so #[ignore]):
+    // is the create_image upload cost first-touch page faults on the fresh
+    // per-scale staging allocation, or the writes themselves? Writes 64 MB
+    // (~scale-0 staging at 2048^2) to a fresh buffer, then again to the SAME
+    // (now-resident) buffer. If first >> warm, the cure is a persistent
+    // pre-touched staging ring (T2), not a faster interleave.
+    //   cargo test -p dssim-vulkan upload_diag -- --ignored --nocapture
+    use super::*;
+    use std::time::Instant;
+
+    fn fill(dst: &mut [f32]) {
+        for (i, d) in dst.iter_mut().enumerate() {
+            *d = (i & 1023) as f32;
+        }
+    }
+
+    fn timed_write(ctx: &Arc<Context>, bytes: usize, n: usize, tag: &str) {
+        let b = ctx
+            .alloc_buffer(
+                "diag.staging",
+                bytes as u64,
+                vk::BufferUsageFlags::TRANSFER_SRC,
+                MemoryLocation::CpuToGpu,
+            )
+            .unwrap();
+        let t = Instant::now();
+        write_mapped_f32_with(&b, n, fill).unwrap();
+        eprintln!("{tag} first-write-to-fresh={:.2}ms", t.elapsed().as_secs_f64() * 1000.0);
+        let t = Instant::now();
+        write_mapped_f32_with(&b, n, fill).unwrap();
+        eprintln!("{tag} warm-write(same-buffer)={:.2}ms", t.elapsed().as_secs_f64() * 1000.0);
+        let t = Instant::now();
+        write_mapped_f32_with(&b, n, fill).unwrap();
+        eprintln!("{tag} warm-write-2={:.2}ms", t.elapsed().as_secs_f64() * 1000.0);
+    }
+
+    #[test]
+    #[ignore = "timing diagnostic; run with --ignored --nocapture"]
+    fn first_touch_vs_warm() {
+        let ctx = Arc::new(Context::new().expect("context"));
+        eprintln!("device: {}", ctx.device_name());
+        let bytes = 64 * 1024 * 1024;
+        timed_write(&ctx, bytes, bytes / 4, "64MB");
+        let bytes2 = 8 * 1024 * 1024;
+        timed_write(&ctx, bytes2, bytes2 / 4, "8MB");
+
+        // Is the ~2.3GB/s the WC mapped memory, or the fill loop's own CPU
+        // cost? Same loop into a plain cached Vec<f32> on the heap.
+        let n = bytes / 4;
+        let mut v = vec![0f32; n];
+        let t = Instant::now();
+        fill(&mut v);
+        eprintln!("cached-Vec same-loop={:.2}ms", t.elapsed().as_secs_f64() * 1000.0);
+        std::hint::black_box(&v);
+    }
+}
