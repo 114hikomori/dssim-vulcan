@@ -334,3 +334,44 @@ Milestone ids refer to `dssim-vulkan-fable-plan.md` §16 (also listed in `AGENTS
   it and move to M8 (CLI --gpu already wired; confirm fallback + CI cover the
   optimized path) and M9 sign-off. Also: run the optimized path on the
   integrated GPU + CI lavapipe before calling M10 fully shipped.
+
+## 2026-09-06 — Audit pass 2 fixes + small-image overhead eliminated (M10 strengthened)
+- Trigger: user redirected to AUDIT_GPU_PORT.md (a second agent's fable-judge
+  review of the Phase H work). Pass 2 findings F25-F33 target `815eab8`/`c4ee8d4`.
+- F26 (enabler): context.rs now prints validation state at Context creation in
+  debug builds. On this host validation is in fact ENABLED (the audit's env had
+  it silently off) — which let me reproduce F25 directly rather than infer it.
+- F25 (HIGH, spec violation): reproduced via validation — the lab->img
+  CopyBuffer used STORAGE-only buffers (VUID-vkCmdCopyBuffer-srcBuffer-00118/
+  -00120). Fixed by writing Lab planes straight into img_all (plane 0 = raw L),
+  deleting the illegal copy AND the separate lab_all buffer. TWINS: swept every
+  CopyBuffer call site for missing transfer usage — staging->rgba and
+  map->readback already had correct flags; lab->img was the only violation.
+  Validation now reports ZERO errors across the whole workspace.
+- F27 mu_all -> GpuOnly; F5 descriptor pool fixed-64 (false "grows" comment) ->
+  named MAX_SETS_PER_POOL=128 sized to the batch plan (worst case v5=40);
+  F29 compare asserts ref/mod width+height; F32 CopyBuffer asserts equal size;
+  F33 deleted ambiguous pc_bytes builder + v5_into dead _stride; F30/F31 debris
+  + "tiny maps" wording. (commit b63ebd5)
+- Small-image overhead (the user's actual ask): measured with temporary
+  create-probe instrumentation. create_image was CPU-bound and DOMINATED by the
+  RGBA upload — three passes (interleave Vec<f32> -> pack_f32 Vec<u8> ->
+  write_mapped memcpy). Collapsed to one direct write into mapped staging via
+  new transfer::write_mapped_f32_with (RGB + gray); removed dead pack_f32.
+  Also closed F1 (Pass-1): sync_host_range now flushes after writes /
+  invalidates before reads (no-op when HOST_COHERENT). (commit 1a25751)
+- Measured (RX 6600M, full create+compare, GPU/CPU ratio): 0.50 (320x200),
+  0.34 (1024^2), 0.44 (2048^2) — GPU now beats CPU at EVERY size, not just
+  large. dssim_check byte-identical before/after (parity preserved).
+- Verified: full workspace green WITH validation (0 vulkan errors, 15 suites);
+  clippy clean for all dssim-vulkan code; no test/shader files touched.
+- Deviated from plan: none.
+- Blocked / open question: F28 (peak-VRAM at 4K from the single-submit design,
+  ~1.9GB at 4096^2) is NOT fixed — it's a large-image memory concern distinct
+  from small-image overhead, and the transient-arena fix has a real correctness
+  hazard (staging is CPU-written at record time, so it cannot be shared across
+  scales within one submit). Bench only exercises to 2048^2.
+- Next: human decision on F28 scope — is 4K a near-term requirement (do the
+  arena / multi-submit split now) or deferred (accept current peak, revisit if
+  4K support is requested)? Also still pending from prior entry: validate the
+  optimized path on the integrated GPU + CI lavapipe before calling M10 shipped.
