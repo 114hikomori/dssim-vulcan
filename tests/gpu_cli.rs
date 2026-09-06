@@ -168,6 +168,51 @@ fn gpu_cli_applies_icc_profile_identically_to_cpu() {
 }
 
 #[test]
+fn gpu_cli_falls_back_to_cpu_when_no_vulkan_device() {
+    // C: exercise the CPU-fallback branch (run_gpu's Context::new() error path)
+    // end-to-end. Every normal environment has a Vulkan device, so without
+    // this the fallback is never actually run -- the other tests only prove
+    // "GPU engaged," never "fallback works." Force the loader to see zero ICDs
+    // (VK_ICD_FILENAMES / VK_DRIVER_FILES -> nonexistent file), then require
+    // that --gpu falls back, exits 0, reports NO device, and matches the CPU.
+    let _serial = gpu_lock();
+    let bogus = if cfg!(windows) {
+        "C:\\nonexistent-dssim-icd.json"
+    } else {
+        "/nonexistent-dssim-icd.json"
+    };
+
+    let cpu = run_cli(&["tests/test1-sm.png", "tests/test2-sm.png"]);
+    assert!(cpu.success, "CPU baseline failed:\n{}", cpu.stderr);
+
+    let out = Command::new(env!("CARGO_BIN_EXE_dssim"))
+        .args(["--gpu", "tests/test1-sm.png", "tests/test2-sm.png"])
+        .env("VK_ICD_FILENAMES", bogus)
+        .env("VK_DRIVER_FILES", bogus)
+        .output()
+        .expect("dssim binary runs");
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    let stdout_lines: Vec<String> = String::from_utf8_lossy(&out.stdout).lines().map(str::to_owned).collect();
+
+    assert!(out.status.success(), "forced-fallback run must exit 0, got:\n{stderr}");
+    assert!(
+        stderr.contains("falling back to CPU"),
+        "expected the CPU fallback to engage with no Vulkan device, but stderr was:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("dssim: gpu device:"),
+        "must NOT report a GPU device when forced to fall back:\n{stderr}"
+    );
+
+    let fb = parse_scores(&stdout_lines);
+    let cs = parse_scores(&cpu.stdout);
+    assert_eq!(fb.len(), 1);
+    let diff = (fb[0].1 - cs[0].1).abs();
+    eprintln!("fallback parity: cpu={} fallback={} diff={diff:.3e}", cs[0].1, fb[0].1);
+    assert!(diff <= TOL, "fallback score {} != CPU {}", fb[0].1, cs[0].1);
+}
+
+#[test]
 fn gpu_cli_size_mismatch_matches_cpu_error() {
     let _serial = gpu_lock();
     // Different-size inputs: both paths must fail (the error text goes to
