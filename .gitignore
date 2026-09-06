@@ -2,3 +2,5 @@ dssim
 target/
 dumps/
 .env
+# Serena MCP tool state (project.yml + its own cache) — local tooling, not repo content
+.serena/
