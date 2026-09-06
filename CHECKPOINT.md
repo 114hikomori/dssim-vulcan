@@ -601,3 +601,26 @@ Milestone ids refer to `dssim-vulkan-fable-plan.md` §16 (also listed in `AGENTS
 - Next: user decision -- continue T11/T10/T3 (diminishing) or stop; then push
   the round-2 commits (8c40165,e561e9f,4bbe731 + docs) and watch CI (T7 zero-copy
   path runs on llvmpipe = unified, so CI exercises it).
+
+## 2026-09-06 — T11 done; Phase H round 2 STOPPED (per user)
+- T11 (dd8a886): create_image_pair builds ref+mod pyramids in ONE submit (shared
+  push_rgb_scales helper + to_image). Batch mode merges both into one
+  dispatch_sequence (one fence instead of two); split mode still flushes per
+  scale. CLI 1-vs-N streaming can't use it (original reused) -- serves
+  single-pair callers + bench. New phase_e_create_pair_matches_separate_and_cpu
+  asserts pair == two-separate (bit-for-bit) == CPU. 320x200 full-path gpu_ms
+  ~3.5->3.0ms, ratio 0.42.
+- Round-2 tracks complete: T9-lite (measurement), diagnostic (first-touch refuted
+  -> loop was a disguised memcpy -> copy_from_slice), T7 (UMA zero-copy), T11
+  (merged create). T5/T6a REFUTED by T9-lite (GPU-busy ~5ms of ~87ms create).
+  T10/T3 not done -- CPU-side micro-overhead below the WC-transfer + CPU-
+  downsample floor; diminishing returns.
+- Verified: full workspace green WITH validation (0 vulkan errors, 15 suites),
+  clippy --no-deps -D warnings clean, .spv unchanged (no shader edits this round).
+- Deviated from plan: yes -- T9-lite (the plan's own first step) refuted T5/T6a;
+  pivoted to the measured bottleneck (upload/CPU-side) per the reviewer's
+  "measurement decides" framing.
+- Blocked / open question: none.
+- Next: push round-2 commits (8c40165,e561e9f,4bbe731,fd6d099,dd8a886 + docs) and
+  watch CI -- llvmpipe is unified so CI exercises T7's zero-copy path, and the
+  new create_pair test runs there. Then Phase H is genuinely done.

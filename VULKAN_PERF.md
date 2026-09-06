@@ -125,3 +125,27 @@ non-goal to move) + WC transfer (~24 ms/64 MB, hardware floor) + recording.
 GPU-busy ~5 ms. The remaining levers (T10 barrier-tighten, T11 merge the two
 creates, T3 descriptor pre-alloc) are CPU-side micro-overhead with modest,
 noise-limited gains — diminishing returns against the transfer/prep floor.
+
+## T11 + stop
+
+**T11** (create_image_pair): both pyramids share one submit (independent
+passes), halving the create-side fence at small/medium. 320×200 full-path
+`gpu_ms` ~3.5→3.0 ms, ratio 0.42. Large sizes unchanged (one fence is noise vs
+the transfer floor). CLI's 1-vs-N streaming can't use it (original reused); it
+serves single-pair callers + the bench.
+
+**Stopping here** (per plan). Round-2 net on the discrete GPU, full path
+(create+compare), GPU/CPU ratio:
+
+| size | start of round 2 | after T9-lite→memcpy→T7→T11 |
+|---|---|---|
+| 320×200 | 0.54–0.59 | ~0.42 |
+| 1024² | 0.36 | ~0.36 |
+| 2048² | 0.43 | ~0.49* |
+| 4096² | 0.52 | ~0.51 |
+
+\*large-size ratios are CPU-thermal-noise-limited on this laptop (±15%); the
+stable signals are `create_gpu` (~5 ms) and the wall drop from the memcpy+T7+T11
+(4K create 421→331 ms). Remaining tracks (T10 barrier-tighten, T3 descriptor
+pre-alloc) target CPU-side micro-overhead already dwarfed by the WC-transfer +
+CPU-downsample floor — diminishing returns, not done. T5/T6a refuted by T9-lite.
