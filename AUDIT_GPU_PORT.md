@@ -414,3 +414,62 @@ construction). Real levers left: T7 on UMA (write lands in final memory,
 no staging copy) or accepting the floor on discrete. Also: `e561e9f` has no
 CHECKPOINT entry — commit message carries the record; acceptable for a
 mid-phase fix, but the next milestone-level change should log one.
+
+---
+
+## Pass 6 — Phase H round 2 (`4bbe731` T7 + `dd8a886` T11 + stop decision)
+
+Pinned to `7b01b59`. Reproduced:
+- T7 parity: workspace green on both GPUs; CI run #11 green — llvmpipe is
+  unified, so CI genuinely exercises the zero-copy path now.
+- T7 win (iGPU): 320×200 create 2.21→1.22 ms, 2048² create 110→81 ms vs my
+  own pre-T7 iGPU run — real, matches doc direction.
+- T11: `create_image_pair` + `phase_e_create_pair_matches_separate_and_cpu`
+  (phase_e now 6 tests; pair == two-separate == CPU); 320×200 dGPU gpu_ms
+  3.57→3.07 matches the ~3.0 claim. Zero removed assertions in test diffs.
+- Stop decision: documented, attributed to user, consistent with the
+  measurement floor (WC-memcpy + CPU downsample).
+
+**F34 (medium, claim accuracy + latent behavior) — UMA detection is OR, not AND;
+"discrete keeps the staging path" is false.** `context.rs:207` uses
+`property_flags.intersects(DEVICE_LOCAL | HOST_VISIBLE)` — `intersects` means
+"has EITHER flag" while the adjacent comment says "both". vulkaninfo confirms
+RX 6600M exposes a pure-DEVICE_LOCAL type (0x0001) → `is_unified_memory()` is
+true on the discrete GPU too, and the discrete path DOES take zero-copy
+(CpuToGpu source buffer, no staging, no CopyBuffer). Consequences:
+(a) the claim in `4bbe731`/`fd6d099`/`VULKAN_PERF.md` ("Discrete keeps the
+staging path / Discrete path unchanged") is contradicted by the code;
+(b) the 2048² dGPU create win measured this pass (90.5→65 ms) is silently a
+T7 effect, not T11 — unclaimed, unmeasured-as-such, positive but undocumented;
+(c) on a non-ReBAR discrete GPU the shader would read the source from system
+RAM — correct (parity would hold) but never benchmarked anywhere, since both
+local GPUs + llvmpipe are unified-ish.
+Fix: `contains()` instead of `intersects()`, and ideally gate on "the type
+gpu-allocator would pick for GpuOnly is host-visible" rather than "some type
+is"; then re-measure discrete staging-vs-zero-copy as an explicit A/B — the
+current accidental data suggests zero-copy-on-discrete may be the better
+default anyway, which is exactly why it should be a measured decision, not a
+detection accident.
+
+**P3 update — the mid-run abort RECURRED (2nd sighting), pattern emerging.**
+Both occurrences were the FIRST `cargo test --workspace` after a rebuild;
+immediate re-run green. Not "one-off": likely cold driver shader cache /
+first-touch device contention across the 6 GPU test binaries. If it happens
+a third time, capture whether the dying binary reports `VK_ERROR_DEVICE_LOST`.
+
+**P5 (process) — round-2 batch was pushed (CI run #11 proves it) with no
+authorization quote in the checkpoints** (the entries say "Next: push", not
+"authorized: user said ..."). Same shape as P2 — likely fine, needs your word.
+
+**Observation — compare_ms variance.** 2048² compare wall measured 33–55 ms
+across runs this session while compare_gpu stayed 6.5–7.9 ms. The doc's
+"±15% noise" caveat understates compare-wall variance; the `*_gpu` columns
+are the stable signals and should be the primary comparison basis.
+
+### Pass 6 verdict
+
+**VERIFIED WITH CAVEATS.** Round-2 perf work is real, tested, and honestly
+stopped; the caveat is F34 — a detection bug whose consequences happen to be
+benign-to-positive on this hardware but whose claims are wrong and whose
+non-ReBAR behavior is unmeasured. One-line fix + an explicit A/B would turn
+an accident into a result.
