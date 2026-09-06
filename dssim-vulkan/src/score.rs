@@ -117,35 +117,50 @@ impl GpuSsim {
             let (w, h) = (img.width(), img.height());
             let pixels = w * h;
 
-            // Staging: interleaved RGBA. RGBAPLU is repr(C) [f32;4] in
-            // r,g,b,a order, so the upload is a byte-for-byte copy of the
-            // contiguous pixel buffer -- not a per-pixel iterator loop.
-            // Guarded by the size assert; the parity suites catch any
-            // layout-assumption error immediately.
-            let staging = self.context.alloc_buffer(
-                "s.staging",
-                (pixels * 4 * 4) as u64,
-                vk::BufferUsageFlags::TRANSFER_SRC,
-                gpu_allocator::MemoryLocation::CpuToGpu,
-            )?;
+            // Upload the interleaved RGBA. RGBAPLU is repr(C) [f32;4] in
+            // r,g,b,a order, so this is a byte-for-byte copy of the contiguous
+            // pixel buffer (size assert guards it; parity suites catch a layout
+            // error). T7: on unified memory the shader's source buffer is
+            // host-visible, so write it directly -- no staging, no copy.
             const _: () = assert!(std::mem::size_of::<dssim_core::RGBAPLU>() == 16);
             let (cow, _, _) = img.as_ref().to_contiguous_buf();
             let px: &[dssim_core::RGBAPLU] = &cow;
             let src =
                 unsafe { std::slice::from_raw_parts(px.as_ptr() as *const u8, px.len() * 16) };
-            crate::transfer::write_mapped_f32_with(&staging, pixels * 4, |dst| {
-                let dstb = unsafe {
-                    std::slice::from_raw_parts_mut(dst.as_mut_ptr() as *mut u8, dst.len() * 4)
-                };
-                dstb.copy_from_slice(src);
-            })?;
-            let rgba_buf = self.context.alloc_buffer(
-                "s.rgba",
-                (pixels * 4 * 4) as u64,
-                vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::STORAGE_BUFFER,
-                gpu_allocator::MemoryLocation::GpuOnly,
-            )?;
-            passes.push(Pass::CopyBuffer { src: staging.clone(), dst: rgba_buf.clone() });
+            let write_rgba_into = |buf: &Buffer| -> Result<()> {
+                crate::transfer::write_mapped_f32_with(buf, pixels * 4, |dst| {
+                    let dstb = unsafe {
+                        std::slice::from_raw_parts_mut(dst.as_mut_ptr() as *mut u8, dst.len() * 4)
+                    };
+                    dstb.copy_from_slice(src);
+                })
+            };
+            let rgba_buf = if self.context.is_unified_memory() {
+                let b = self.context.alloc_buffer(
+                    "s.rgba",
+                    (pixels * 4 * 4) as u64,
+                    vk::BufferUsageFlags::STORAGE_BUFFER,
+                    gpu_allocator::MemoryLocation::CpuToGpu,
+                )?;
+                write_rgba_into(&b)?;
+                b
+            } else {
+                let staging = self.context.alloc_buffer(
+                    "s.staging",
+                    (pixels * 4 * 4) as u64,
+                    vk::BufferUsageFlags::TRANSFER_SRC,
+                    gpu_allocator::MemoryLocation::CpuToGpu,
+                )?;
+                write_rgba_into(&staging)?;
+                let b = self.context.alloc_buffer(
+                    "s.rgba",
+                    (pixels * 4 * 4) as u64,
+                    vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::STORAGE_BUFFER,
+                    gpu_allocator::MemoryLocation::GpuOnly,
+                )?;
+                passes.push(Pass::CopyBuffer { src: staging.clone(), dst: b.clone() });
+                b
+            };
 
             // img_all: Lab planes written straight in by the shader (plane 0 =
             // raw L, planes 1,2 = chroma, pre-blurred in place below); plane
@@ -251,25 +266,38 @@ impl GpuSsim {
             let (w, h) = (img.width(), img.height());
             let pixels = w * h;
 
-            let staging = self.context.alloc_buffer(
-                "g.staging",
-                (pixels * 4) as u64,
-                vk::BufferUsageFlags::TRANSFER_SRC,
-                gpu_allocator::MemoryLocation::CpuToGpu,
-            )?;
-            // Gray pixels are already f32, so the upload is a direct slice copy
-            // (no per-pixel iterator), same as the RGB path's byte copy.
+            // Gray pixels are already f32, so the upload is a direct slice copy.
+            // T7: on unified memory write the shader's source buffer directly.
             let (cow, _, _) = img.as_ref().to_contiguous_buf();
-            crate::transfer::write_mapped_f32_with(&staging, pixels, |dst| {
-                dst.copy_from_slice(&cow);
-            })?;
-            let gray_buf = self.context.alloc_buffer(
-                "g.gray",
-                (pixels * 4) as u64,
-                vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::STORAGE_BUFFER,
-                gpu_allocator::MemoryLocation::GpuOnly,
-            )?;
-            passes.push(Pass::CopyBuffer { src: staging.clone(), dst: gray_buf.clone() });
+            let write_gray_into = |buf: &Buffer| -> Result<()> {
+                crate::transfer::write_mapped_f32_with(buf, pixels, |dst| dst.copy_from_slice(&cow))
+            };
+            let gray_buf = if self.context.is_unified_memory() {
+                let b = self.context.alloc_buffer(
+                    "g.gray",
+                    (pixels * 4) as u64,
+                    vk::BufferUsageFlags::STORAGE_BUFFER,
+                    gpu_allocator::MemoryLocation::CpuToGpu,
+                )?;
+                write_gray_into(&b)?;
+                b
+            } else {
+                let staging = self.context.alloc_buffer(
+                    "g.staging",
+                    (pixels * 4) as u64,
+                    vk::BufferUsageFlags::TRANSFER_SRC,
+                    gpu_allocator::MemoryLocation::CpuToGpu,
+                )?;
+                write_gray_into(&staging)?;
+                let b = self.context.alloc_buffer(
+                    "g.gray",
+                    (pixels * 4) as u64,
+                    vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::STORAGE_BUFFER,
+                    gpu_allocator::MemoryLocation::GpuOnly,
+                )?;
+                passes.push(Pass::CopyBuffer { src: staging.clone(), dst: b.clone() });
+                b
+            };
 
             let lab = self.context.alloc_buffer(
                 "g.lab",

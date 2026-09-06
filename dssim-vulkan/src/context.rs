@@ -38,6 +38,11 @@ pub struct Context {
     physical_device: vk::PhysicalDevice,
     device_name: String,
     device_type: vk::PhysicalDeviceType,
+    /// T7: true when a DEVICE_LOCAL memory type is also HOST_VISIBLE (integrated
+    /// / UMA, incl. llvmpipe). On such devices the CPU can write straight into
+    /// the buffer the shader reads, so `create_image` skips the staging buffer
+    /// and the `staging->device` copy. Discrete GPUs keep the staging path.
+    is_unified_memory: bool,
     /// All compute-capable devices found at creation, best first.
     pub device_candidates: Vec<String>,
     pub(crate) device: ash::Device,
@@ -197,6 +202,13 @@ impl Context {
                 .to_string_lossy()
                 .into_owned();
             let device_type = props.device_type;
+            // T7: UMA if any memory type is both DEVICE_LOCAL and HOST_VISIBLE.
+            let mem_props = instance.get_physical_device_memory_properties(physical_device);
+            let is_unified_memory = mem_props.memory_types_as_slice().iter().any(|mt| {
+                mt.property_flags.intersects(
+                    vk::MemoryPropertyFlags::DEVICE_LOCAL | vk::MemoryPropertyFlags::HOST_VISIBLE,
+                )
+            });
 
             let queue_priorities = [1.0];
             let queue_info = vk::DeviceQueueCreateInfo::default()
@@ -253,6 +265,7 @@ impl Context {
                 physical_device,
                 device_name,
                 device_type,
+                is_unified_memory,
                 device_candidates,
                 device,
                 queue_family_index,
@@ -275,6 +288,12 @@ impl Context {
 
     pub fn device_type(&self) -> vk::PhysicalDeviceType {
         self.device_type
+    }
+
+    /// T7: whether this device has unified (shared CPU/GPU) memory, so the
+    /// upload path can write straight into the shader's source buffer.
+    pub fn is_unified_memory(&self) -> bool {
+        self.is_unified_memory
     }
 
     /// Bytes currently in live `Buffer` allocations (F28 measurement).
