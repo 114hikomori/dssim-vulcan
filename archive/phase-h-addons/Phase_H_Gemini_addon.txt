@@ -1,0 +1,94 @@
+รายงานผลการค้นคว้าเพิ่มเติมสำหรับแนวทางการ Optimize ประสิทธิภาพของ `dssim-vulkan` ที่ตกหล่นหรือไม่พบในการค้นคว้ารอบก่อนหน้า (รวมถึงกรณีลิงก์ 404 และปัญหาค้นหาโค้ดอ้างอิงไม่พบ) พร้อมวิเคราะห์ตามข้อเท็จจริงล่าสุดที่พบว่าคอขวดกว่า 95% ของเวลาประมวลผลอยู่ที่ Host-side `prep`
+
+---
+
+# รายงานการวิจัยเพิ่มเติม: เทคนิคการ Optimize ที่ยังไม่ได้ลองและตกหล่นจากการค้นคว้า
+
+จากการตรวจสอบข้อค้นพบใน *Pass-4 addendum* ด้วยตัววัดเวลาฮาร์ดแวร์ GPU (T9-lite บน RX 6600M) พบว่าที่ขนาดภาพ 2048² เวลา Wall time อยู่ที่ 93.4 ms แต่เป็น GPU-busy เพียง 5.0 ms (~5%) ส่วนที่เหลือ ~88 ms (กว่า 95%) เสียไปกับ **Host-side `prep` และ Memory Transfer** ซึ่งได้ Bandwidth เพียง ~1 GB/s (ผิดปกติอย่างมากเมื่อเทียบกับ PCIe 4.0 x8 ที่ทำได้ 10–15 GB/s และ System RAM ที่ทำได้ 30–50 GB/s)
+
+ดังนั้น การ Optimize ที่ค้นคว้าตกหล่นไปจึงแบ่งออกเป็น 3 กลุ่มหลัก:
+1. **เทคนิคฝั่ง Host Memory & Dataflow** ที่แก้คอขวด 95% โดยตรง (ซึ่งการค้นคว้ารอบแรกมองข้ามเพราะตั้งสมมติฐานผิดว่าคอขวดอยู่ที่ Shader Compute)
+2. **เทคนิคที่ตกหล่นจากลิงก์ 404 หรือค้นหาไม่พบในรอบแรก** (Rastergrid, Zeux, Subgroup Intrinsics)
+3. **ฟีเจอร์สมัยใหม่ของ Vulkan 1.3 / 1.4** สำหรับ Data Ingestion
+
+---
+
+## 1. วิธีแก้คอขวดหลัก: ปลดล็อก Host-side `prep` (~1 GB/s Anomaly)
+
+สาเหตุที่ Host `prep` ทำได้เพียง ~1 GB/s ไม่ได้เกิดจากอัลกอริทึมการแปลงข้อมูล แต่เกิดจากพฤติกรรมของ Memory Subsystem และ CPU Cache Architecture:
+
+### 1.1 Non-Temporal Streaming Stores (AVX2 / AVX-512) ป้องกัน Write-Combining Stall
+* **กลไก:** หน่วยความจำประเภท `HOST_VISIBLE | DEVICE_LOCAL` (Resizable BAR) บน discrete GPU จะถูกแมปบน x86-64 เป็น **Write-Combining (WC)** ซึ่งไม่มี L1/L2 Cache คอยหนุน หาก CPU วนลูปเขียนค่าแบบสเกลาร์ทีละ `f32` หรือเขียนข้อมูลไม่เต็ม Cacheline (64 bytes) CPU Store Buffers จะเกิด Partial Eviction และ Stall คอยบัส PCIe ตลอดเวลา ทำให้ Throughput ตกจาก 12 GB/s เหลือ ~1 GB/s
+* **วิธีแก้:** ใช้ Non-Temporal Streaming Stores (`_mm256_stream_ps` ใน AVX2 หรือ `_mm512_stream_ps`) เขียนข้อมูลทีละ 32–64 bytes แบบข้าม Cache ไปยัง PCIe Write Buffer โดยตรง
+* **Parity Risk:** **0% (ปลอดภัยสมบูรณ์)** ไม่มีผลต่อลำดับการคำนวณ Float ทางคณิตศาสตร์
+
+### 1.2 สลับไปใช้ `HOST_CACHED` Staging Buffer แทน Direct VRAM Write
+* **กลไก:** แมปหน่วยความจำ Staging Buffer ด้วยแฟล็ก `VK_MEMORY_PROPERTY_HOST_CACHED_BIT` ใน System RAM แทนที่จะเขียนตรงเข้า VRAM
+  * CPU Interleave/Prep จะเขียนลง CPU Cache ด้วยความเร็ว 40–60 GB/s (ใช้เวลาเพียง 1–2 ms สำหรับ 89 MB)
+  * จากนั้นให้ DMA Engine ของ GPU ดึงข้อมูลผ่านคำสั่ง `vkCmdCopyBufferToImage` หรือ `vkCmdCopyBuffer` ซึ่งฮาร์ดแวร์ DMA ของ GPU สามารถ Saturate ทราฟฟิก PCIe เต็มแบนด์วิดท์ (12–15 GB/s ใช้เวลา ~6 ms)
+* **Parity Risk:** **0%** เป็นเพียงการเปลี่ยนเส้นทาง Memory Transport
+
+### 1.3 ย้ายการ Downsample และ Color Conversion ไปทำบน GPU ทั้งหมด (Zero-CPU-Prep)
+* **กลไก:** ในสถาปัตยกรรมปัจจุบัน CPU เป็นผู้แปลง Lab และคำนวณ Downsample ทำเป็น Image Pyramid ทั้งหมด แล้วอัปโหลดข้อมูลทั้งพีระมิด (~89 MB) ขึ้น GPU
+  * หากเปลี่ยนเป็นการ **อัปโหลดเฉพาะภาพต้นฉบับ Level 0 ขนาดเดียว (เช่น RGBA 2048² ดิบ ขนาดเพียง ~16 MB)**
+  * แล้วเขียน Compute Shader ตัวแรกให้ทำ Color Conversion (sRGB $\to$ Lab)
+  * จากนั้นสร้างพีระมิดแต่ละ Scale ด้วย GPU Compute Shader (หรือ `vkCmdBlitImage` หากยอมรับ Sampler ได้)
+* **ผลลัพธ์:** ปริมาณข้อมูลที่ต้องส่งผ่าน PCIe ลดลงทันที >75% และลดภาระ CPU Prep จาก ~70 ms เหลือเพียงระดับ sub-millisecond
+* **Parity Risk:** **ต่ำถึงปานกลาง** หากเขียน Shader คำนวณ Downsample ด้วยสูตรเดียวกับ CPU (คูณและบวกด้วยลำดับเดียวกัน) จะคงค่า Parity ได้อย่างสมบูรณ์
+
+---
+
+## 2. ข้อมูลจากแหล่งอ้างอิงที่รอบแรกค้นหาไม่เจอ (404 / ขาด Reference)
+
+### 2.1 Rastergrid: Bilinear Texture Sampling สำหรับ Separable Blur
+* **ที่มา:** Daniel Rákos (2010), *"Efficient Gaussian blur with linear sampling"* (ลิงก์เดิมที่ 404: `rastergrid.com/blog/2010/09/efficient-gaussian-blur-with-linear-sampling/`)
+* **กลไก:** อาศัยคุณสมบัติของ Hardware Texture Sampler (Bilinear Filtering) ยุบการอ่าน 2 Texels ที่อยู่ติดกันให้เหลือเพียง 1 Texture Fetch โดยขยับ UV ไปอยู่ตำแหน่งกึ่งกลางแบบถ่วงน้ำหนัก:
+  $$w_1 x_1 + w_2 x_2 = (w_1 + w_2) \cdot \text{sample}\left(\text{coord} + \frac{w_2}{w_1 + w_2}\right)$$
+  สำหรับ Gaussian Blur ขนาด 5-tap (รัศมี 2) จากเดิมที่ต้องอ่าน 5 ครั้ง (Center + ซ้าย 2 + ขวา 2) จะลดเหลือเพียง **3 Texture Fetches** (Center 1 ครั้ง + Linear Sample ด้านข้าง 2 ครั้ง)
+* **เหตุผลที่ไม่ได้ลอง:** ลิงก์ 404 ในการค้นคว้าเดิม
+* **Parity Evaluation:** **ไม่ผ่าน Parity Gate** เนื่องจาก Texture Sampler ของ GPU ทำงานที่ Fixed-point Precision (ปกติ 8–16 บิต Subtexel Precision) ซึ่งจะทำให้ลำดับโอเปอเรชันและค่า FP32 เบี่ยงเบนจาก CPU Reference ชัดเจน (ขัดแย้งกับข้อกำหนด `precise`/NoContraction)
+
+### 2.2 Subgroup Operations สำหรับ Separable Convolutions (แทนที่ Shared Memory / LDS)
+* **ที่มา:** `VK_KHR_shader_subgroup_shuffle` / GLSL `GL_KHR_shader_subgroup_shuffle`
+* **กลไก:** ในการค้นคว้ารอบแรก แทร็ก T6 (Fused blur) มุ่งเน้นไปที่การใช้ Shared Memory (LDS) ซึ่งมีความเสี่ยงเรื่อง Bank Conflict และต้องมี `barrier()` ซิงโครไนซ์ระหว่างเธรด
+  * ความจริงแล้ว บน GPU สถาปัตยกรรม AMD RDNA 2 (RX 6600M) มีขนาด Wavefront 32 หรือ 64 เธรด
+  * การทำ 1D Horizontal Blur สามารถใช้คำสั่งระดับ Subgroup เช่น `subgroupShuffleUp()` และ `subgroupShuffleDown()` เพื่อดึงค่าพิกเซลข้างเคียงจากรีจิสเตอร์ของเธรดข้างเคียงได้โดยตรงที่ระดับ Hardware Register File
+  * **ไม่ต้องจอง Shared Memory (LDS) เลยแม้แต่ไบต์เดียว และไม่ต้องสั่ง `barrier()`**
+* **Parity Risk:** **0%** เพราะยังคงสมการคณิตศาสตร์และการเรียงลำดับการคูณ/บวก FP32 ได้ตรงตามสเปกเดิมทุกประการ เพียงแต่เปลี่ยนช่องทางการส่งผ่านตัวแปรจาก RAM/LDS ไปเป็น Register Exchange
+
+### 2.3 ข้อสังเกตจากบทความของ Zeux (Arseny Kapoulkine)
+* **ที่มา:** *Writing an efficient Vulkan renderer* (`zeux.io/2020/02/27/writing-an-efficient-vulkan-renderer/`)
+* **ประเด็นที่ตกหล่น:**
+  1. **Implicit Decompression Bubbles:** ไดรเวอร์ของ AMD มีฟีเจอร์ DCC (Delta Color Compression) หากมีการระบุ Pipeline Barrier กว้างเกินไป หรือสลับ Image Layout ไปมาโดยไม่จำเป็น ไดรเวอร์จะแทรก Pass คลายการบีบอัด (Decompress) แบบเงียบๆ ซึ่งกินเวลา GPU สูงมาก (สอดคล้องกับข้อเสนอ T10 ที่ให้ Tighten Barrier)
+  2. **Split Barriers / Events:** การใช้ `vkCmdSetEvent` คู่กับ `vkCmdWaitEvents` หรือ Split Pipeline Barriers เพื่อให้ช่องว่างระหว่างจุดสั่งงานกับจุดที่ต้องใช้ข้อมูลกว้างขึ้น ช่วยให้ไดรเวอร์จัดคิวงานเหลื่อมกัน (Overlap) ได้ดีกว่าการบล็อกด้วย Barrier ตัวเดียวที่จุดเริ่มของ Pass ถัดไป
+
+---
+
+## 3. ฟีเจอร์สมัยใหม่ของ Vulkan (Vulkan 1.3 / 1.4) ที่ยังไม่ได้นำมาใช้
+
+### 3.1 `VK_EXT_host_image_copy` (บรรจุใน Vulkan 1.4 Core)
+* **กลไก:** คำสั่ง `vkCopyMemoryToImageEXT` ช่วยให้ CPU สามารถคัดลอกข้อมูลพิกเซลจากหน่วยความจำ Host เข้าสู่ `VkImage` ใน VRAM โดยตรง โดยไม่ต้องสร้าง Staging Buffer, ไม่ต้องสร้าง Command Pool, ไม่ต้องบันทึก Command Buffer และไม่ต้องเรียก `vkQueueSubmit`
+* **ประโยชน์:** ตัด Driver Overhead ของฝั่ง CPU ในกระบวนการคัดลอกรูปภาพออกไปทั้งหมด เหมาะอย่างยิ่งกับการส่งภาพเข้าเทียบรายคู่
+
+### 3.2 Asynchronous Transfer Queue (Dedicated DMA Queue)
+* **กลไก:** RX 6600M มีฮาร์ดแวร์ DMA Engine แยกต่างหาก (`VK_QUEUE_TRANSFER_BIT`) นอกเหนือจาก Compute Engine
+  * ปัจจุบันโค้ดส่งคำสั่งคัดลอกและคำนวณผ่าน Compute Queue เดียวกัน ทำให้ต้องรอต่อคิวกัน
+  * หากแยกงาน Upload ไปไว้บน Transfer Queue จะสามารถทำ DMA โอนย้ายภาพคู่ถัดไปข้าม PCIe ควบคู่ไปกับที่ Compute Queue กำลังรัน SSIM ของคู่ปัจจุบันได้ 100%
+
+### 3.3 `VK_EXT_descriptor_buffer` (หรือ `VK_KHR_push_descriptor`)
+* **กลไก:** ปัญหาในแทร็ก T3 (Descriptor Allocation Overhead) สามารถแก้ได้เบ็ดเสร็จด้วย Descriptor Buffer ซึ่งยกเลิกระบบ `VkDescriptorPool` และ `VkDescriptorSet` โดยให้เขียน Descriptor ลงบน `VkBuffer` ทั่วไปด้วย `memcpy` แล้วส่งพอยน์เตอร์ GPU ผ่านคำสั่ง `vkCmdSetDescriptorBufferOffsetsEXT` ช่วยตัด CPU Driver Overhead ในการ Bind ข้อมูล
+
+---
+
+## 4. ตารางเปรียบเทียบและข้อเสนอแนะเชิงปฏิบัติ (Roadmap)
+
+| แนวทาง | ผลกระทบที่คาดหวัง | ความเสี่ยงต่อ Parity | ความยากในการทำ | สถานะ / ลำดับความสำคัญ |
+|---|---|---|---|---|
+| **GPU-side Downsample & Prep** | **ลด Wall time ได้ 60–80 ms** (ลดเวลา Create ได้มหาศาล) | ต่ำ (ถ้าคุมลำดับ op ให้ตรง) | ปานกลาง | **ควรทำเป็นอันดับ 1** (แก้ตรงจุดคอขวด 95%) |
+| **Streaming Stores (AVX2 NT Stores)** | แบนด์วิดท์ CPU $\to$ VRAM เพิ่มจาก ~1 เป็น 10+ GB/s | **0% (Bit-exact)** | ต่ำ (แก้ลูปเขียนหน่วยความจำ) | **ควรทำเป็นอันดับ 2** (แก้คอขวด Memory) |
+| **`HOST_CACHED` Staging Buffer** | ป้องกัน Write-Combining Stall ของ CPU | **0% (Bit-exact)** | ต่ำ (สลับ Flag หน่วยความจำ) | **ควรทำควบคู่กับข้อบน** |
+| **Subgroup Shuffle Blur (T6-alt)** | ลดเวลา GPU Compute ลงอีก 20–40% โดยไม่ต้องใช้ LDS | **0% (Bit-exact)** | ปานกลาง | ทำเมื่อเคลียร์คอขวด Host สำเร็จแล้ว |
+| **`VK_EXT_host_image_copy`** | ลด CPU Overhead ในการจัดการ Staging Buffer | 0% | ปานกลาง (ต้องการ Driver รองรับ) | ทางเลือกสถาปัตยกรรมระยะยาว |
+| **Rastergrid Linear Blur** | ลด Texture Fetch ลงเกือบครึ่งหนึ่ง | **สูงมาก (ไม่ผ่าน Gate)** | ต่ำ | **ปฏิเสธ** (ขัดแย้งกับ Parity Gate) |
+
+**สรุปข้อเสนอแนะ:** ควรมุ่งเป้าไปที่ **การแก้พฤติกรรมเขียนหน่วยความจำของ Host (Streaming Stores / `HOST_CACHED`)** และ **การย้ายงาน Downsample ไปทำบน GPU** เป็นอันดับแรก เพราะจะปลดล็อกเวลา 70–90 ms ที่เสียไปกับ Host-prep ได้โดยตรง ส่วนการปรับแต่ง Shaders ด้วย Subgroup Shuffle ควรเก็บไว้ทำในขั้นตอนสุดท้ายหลังจากที่เวลา Host ลดลงมาจน GPU Compute กลายเป็นคอขวดที่แท้จริงแล้ว

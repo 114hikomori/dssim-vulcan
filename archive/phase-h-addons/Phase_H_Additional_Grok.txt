@@ -1,0 +1,216 @@
+# Phase H Performance Experiments — Additional Optimization Tracks (Research Delta)
+
+Date: 2026-09-07. Companion research to `PERF_EXPERIMENTS_PHASE_H.md`.  
+No code changed. Every technique cites sources opened 2026-09-07.  
+Scope: techniques that were **absent or only glancingly noted** in the original S1–S12 + pass-4 research, and that have **not been attempted** on the dssim-vulkan path.
+
+Global parity gate remains identical: blur_parity / blur_dump_parity / lab_parity / ssim_parity / phase_e green at existing tolerances; `precise`/NoContraction sites invariant; identity exactly 0.0.
+
+---
+
+## 1. What the original research already covered (reminder)
+
+T1 submit batching (DONE), T2 staging/arena (PARTIAL), T3 descriptors (NOT TRIED), T4 timeline (demoted), T5 2-D dispatch (demoted by T9-lite), T6 shared-memory fusion (gated), T7 UMA zero-copy (DONE), T8 batch CLI, T9 measurement (PARTIAL), T10 barrier tightening, T11 merged create (DONE).  
+Specialization constants were named as a “NEW idea” in the pass-4 research delta but never turned into a track.
+
+---
+
+## 2. New / under-explored techniques
+
+### A. Specialization constants (for workgroup size, dimensions, strides)
+
+**What**  
+Replace push-constant or uniform reads of `width`, `height`, `stride`, `local_size`, channel count, etc. with `layout(constant_id = N) const uint \ldots`. Values are fixed at `vkCreateComputePipelines` time, so the driver can constant-fold, unroll loops, eliminate dead code and reduce register pressure.
+
+**Evidence**  
+- NVIDIA Dos & Don’ts (updated 2025): “Use specialization constants. This may cause a possible decrease in the number of instructions and registers used by the shader.”  
+- Khronos sample “Utilizing Specialization Constants”: 4.4 % gain even on a trivial shader; larger gains when control-flow is involved.  
+- RDNA4 / ggml experience (2026): specialization constants let the register allocator pick different ceilings per pipeline variant; used to ship multiple DMMV kernels from one SPIR-V binary without decode regressions.  
+- LocalSizeId (core 1.3) lets the workgroup size itself be a specialization constant.
+
+**Expected effect on us**  
+Our shaders re-read width/height/stride from push constants on every invocation. Folding them should shave a few percent of pure GPU time and, more importantly, give the compiler a cleaner view for later fusion work. Pipeline-count growth is the only real cost (one pipeline per common size or per workgroup size).
+
+**Risk**  
+Low for FP semantics (pure constant substitution). Medium for binary size / pipeline-cache pressure if every resolution gets its own pipeline.
+
+**Exit observation**  
+Identical maps + measurable reduction in GPU-busy time (T9-lite timestamps) or in register count reported by the vendor offline compiler.
+
+---
+
+### B. Subgroup operations (wave-level reductions / shuffles)
+
+**What**  
+Use `subgroupAdd`, `subgroupShuffle`, `subgroupBallot`, etc. (Vulkan 1.1 core) for intra-wave communication instead of (or before) shared-memory barriers. Subgroup size is typically 32 (NVIDIA) / 64 (AMD).
+
+**Evidence**  
+- Khronos “Vulkan Subgroup Tutorial” (still the canonical reference).  
+- llama.cpp Vulkan backend (2024–2026 PRs): dynamic subgroup size, subgroup reductions for quantised mat-vec; 15 % gains on some kernels.  
+- Mobile best-practice guides: subgroups are the primary on-chip communication mechanism when dedicated LDS is weak or absent.
+
+**Expected effect on us**  
+Useful inside a separable blur or SSIM statistics kernel for local reductions (e.g. summing a 5-tap neighbourhood inside the wave before writing shared memory). Can reduce barrier traffic and shared-memory bank conflicts. Orthogonal to full H5+V5 fusion (T6).
+
+**Risk**  
+Medium – must stay inside the same per-pixel expression order; any change in reduction tree shape can break the NoContraction / precise contract. Subgroup size is not portable; must query and either specialise or write size-agnostic code.
+
+**Exit observation**  
+Bitwise-identical maps on all fixtures; GPU-busy time improved on both discrete and integrated.
+
+---
+
+### C. Descriptor-buffer / push-descriptor / update-template path
+
+**What**  
+- `VK_EXT_descriptor_buffer` (or the newer descriptor-heap variants): descriptors live in a buffer; update is a `memcpy`.  
+- `VK_KHR_push_descriptor` / `VK_KHR_descriptor_update_template`: avoid full `vkUpdateDescriptorSets` + pool allocate/reset.  
+- Pre-baked update templates that the driver can “precompile”.
+
+**Evidence**  
+- Maister’s “Low-level graphics programming” series (2024–2026): extensive measurements showing descriptor-buffer and heap paths cutting update cost from microseconds to hundreds of nanoseconds.  
+- Arm Best Practices: “Instead of resetting descriptor pools \ldots update descriptor sets that are already allocated”; prefer dynamic offsets or descriptor indexing.  
+- NVIDIA Dos & Don’ts still lists descriptor updates as heavyweight CPU work.
+
+**Expected effect on us**  
+T3 (pre-allocate sets) is the classic approach; descriptor buffers / push descriptors are the modern replacement. Once T1 has collapsed us to 1–2 submits, residual CPU time in the record path is dominated by descriptor traffic. This is the natural next step after (or instead of) classic pre-allocation.
+
+**Risk**  
+Low–medium. Requires a one-time layout change and a feature check; discrete path stays intact.
+
+**Exit observation**  
+Nsight / RGP CPU trace shows zero `vkUpdateDescriptorSets` / `vkAllocateDescriptorSets` in the steady-state compare path.
+
+---
+
+### D. Thread-group ID swizzling / tiling for L2 locality
+
+**What**  
+Reorder the 2-D dispatch so that consecutive workgroups are spatially adjacent in the image (horizontal or Hilbert-style tiling) instead of the default linear order. Improves L2 hit rate for wide-kernel / multi-tap filters.
+
+**Evidence**  
+- NVIDIA Technical Blog “Optimizing Compute Shaders for L2 Locality using Thread-Group ID Swizzling” (2020, still cited): 47 % gain on a full-screen denoiser at 1440p (L2 hit rate 63 % → 86 %).  
+- Applicable whenever the kernel is VRAM-latency bound and neighbouring workgroups share a large footprint (exactly the case for a 5-tap separable blur or an SSIM window).
+
+**Expected effect on us**  
+Only relevant after T5-style 2-D dispatch is live and after GPU time actually dominates (currently ~5 % of create wall). At 2048² / 4096² the win could be noticeable; at 320×200 it is zero.
+
+**Risk**  
+None to FP results (pure indexing change). Must re-verify blob freshness and NoContraction counts.
+
+**Exit observation**  
+Identical maps; measurable L2 hit-rate improvement in RGP / Nsight; GPU-busy delta recorded.
+
+---
+
+### E. Lazy / deferred barriers inside a single command buffer
+
+**What**  
+Instead of emitting a full memory barrier after every pass, collect source/destination access masks and emit a single combined barrier only when a true RAW hazard is about to be consumed. (llama.cpp Vulkan “barrier deferral” pattern.)
+
+**Evidence**  
+- Vulkanised 2026 ggml/llama.cpp talk: deferring barriers after every dispatch, then emitting them lazily, contributed to large end-to-end gains together with fusion.  
+- AMD GPUOpen “Vulkan Barriers Explained” (already in original S3) already advised tight stage masks; the deferral technique is the practical implementation of that advice at scale.
+
+**Expected effect on us**  
+`dispatch_sequence` is deliberately over-barriered (“every buffer the pass touches becomes visible to every later consumer”). T10 already flagged this; the lazy-collection approach is the concrete algorithm. With only a handful of passes left after T1, the absolute win is small, but it is free correctness hygiene and removes a source of bubbles.
+
+**Risk**  
+Medium – incorrect deferral re-introduces data races. Must be validated with GPU-AV and with the existing parity suite.
+
+**Exit observation**  
+Validation clean; GPU timestamp bubbles reduced; parity green.
+
+---
+
+### F. Persistent mapped staging + first-touch / write-combine hygiene (re-justified T2)
+
+**What**  
+Keep a long-lived host-visible staging buffer (or ring) that is mapped once and never unmapped. Touch every page once at creation time (or use a platform-specific “commit” call) so that the per-comparison `prep` phase no longer pays page-fault storms. Prefer write-combine mappings where the driver exposes them.
+
+**Evidence**  
+- Original T9-lite measurement: 2048² create = 93 ms wall of which only 5 ms is GPU-busy; the residual is almost entirely host-side prep of ~89 MB of pyramid data.  
+- Khronos Memory Allocation chapter + NVIDIA Dos & Don’ts: `vkAllocateMemory` and first-touch faults are expensive; sub-allocation and persistent mapping are the classic remedies.  
+- The earlier rejection of a staging ring (“staging is CPU-written at record time”) was made **without** the T9-lite numbers; the measurement now supplies the missing justification.
+
+**Expected effect on us**  
+Directly attacks the current dominant cost at large sizes. Orthogonal to T7 (UMA already skips staging).
+
+**Risk**  
+Low if the ring respects flush/invalidate rules for non-coherent memory (S9). Ordering around wrap-around must be correct.
+
+**Exit observation**  
+`prep` wall time collapses; allocator visualizer shows bounded live allocations; parity green.
+
+---
+
+### G. Explicit pipeline-cache / pipeline-binary control
+
+**What**  
+Guarantee a warm `VkPipelineCache` (or the newer `VK_KHR_pipeline_binary`) so that pipeline creation cost is paid once per process, never per comparison. Useful if specialization-constant variants multiply the pipeline count.
+
+**Evidence**  
+- Khronos pipeline-cache sample and the 2024 `VK_KHR_pipeline_binary` blog.  
+- Standard advice in every vendor “Dos & Don’ts”.
+
+**Expected effect on us**  
+Negligible for the steady-state compare path (pipelines are already created once). Becomes load-bearing only if we adopt specialization-constant variants for many sizes.
+
+**Risk**  
+None.
+
+**Exit observation**  
+Pipeline creation time stays out of the hot path; cache hit rate visible in vendor tools.
+
+---
+
+## 3. Techniques examined and deliberately left out
+
+| Technique | Why not pursued |
+|---|---|
+| Cooperative matrices / tensor cores | Wrong precision domain; parity risk far higher than any plausible gain for f32 SSIM. |
+| Vendor image-processing extensions (QCOM, etc.) | Non-portable; we target desktop AMD + lavapipe. |
+| Full bindless descriptor indexing | Heavy architectural change; descriptor buffers already give most of the CPU win. |
+| Async compute queue for a single compare | Almost no independent work left after T1/T11; only useful for true multi-image batch (T8). |
+| FP16 intermediates | Breaks the precise / NoContraction contract and the existing parity numbers. |
+
+---
+
+## 4. Suggested priority (re-ranked against current profile)
+
+Current bottleneck (T9-lite): host `prep` dominates large images; residual CPU record overhead still visible at 320×200; pure GPU compute is only ~5 % of create wall.
+
+1. **F – Persistent mapped staging / first-touch hygiene** (re-justified T2) — attacks the measured #1 cost.  
+2. **A – Specialization constants** — cheap, low risk, helps both CPU record and GPU.  
+3. **C – Descriptor-buffer / push-descriptor path** — finishes the CPU-side work that classic T3 would have done.  
+4. **E – Lazy barriers** — free correctness + small bubble reduction.  
+5. **B – Subgroup ops** — only after a 2-D / fused kernel exists.  
+6. **D – Thread-group swizzling** — only once GPU time actually matters.  
+7. **G – Pipeline-binary hygiene** — opportunistic when specialization constants multiply pipelines.
+
+T6 (full shared-memory fusion) remains the highest-upside compute change but stays gated behind bitwise-map parity and behind the host-side wins above.
+
+---
+
+## 5. Honest expectations
+
+- None of the new tracks will turn a 320×200 single-pair GPU path into a CPU beater; fixed launch + PCIe costs remain.  
+- At 2048² / 4096² and in batch mode the combination of F + A + C should move the wall-time needle far more than any pure shader tweak.  
+- Every claim above is still a hypothesis; the only contract is the measured table in `CHECKPOINT.md` / `VULKAN_PERF.md`.
+
+---
+
+## 6. Sources opened 2026-09-07 (beyond original S1–S12)
+
+- NVIDIA “Tips and Tricks: Vulkan Dos and Don’ts” (2025 update)  
+- Khronos “Utilizing Specialization Constants” sample  
+- Khronos Vulkan Subgroup Tutorial  
+- Maister’s descriptor-buffer / descriptor-heap series  
+- NVIDIA “Optimizing Compute Shaders for L2 Locality using Thread-Group ID Swizzling”  
+- Vulkanised 2026 ggml/llama.cpp talk (barrier deferral + fusion)  
+- Arm GPU Best Practices (descriptor & compute chapters, 2025)  
+- `VK_KHR_pipeline_binary` Khronos blog (2024)  
+- RDNA4 specialization-constant write-up (zolotukhin.ai, 2026)  
+- llama.cpp Vulkan PR history (subgroup size, descriptor handling)
+
+All claims above are traceable to one of these pages or to the original Phase H measurements.
