@@ -1,3 +1,4 @@
 dssim
 target/
 dumps/
+.env
