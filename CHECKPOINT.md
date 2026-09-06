@@ -375,3 +375,42 @@ Milestone ids refer to `dssim-vulkan-fable-plan.md` §16 (also listed in `AGENTS
   arena / multi-submit split now) or deferred (accept current peak, revisit if
   4K support is requested)? Also still pending from prior entry: validate the
   optimized path on the integrated GPU + CI lavapipe before calling M10 shipped.
+
+## 2026-09-06 — F7 + F28 closed (audit follow-ups after the push/CI check)
+- Context: pushed the Phase-H + audit-fix batch (authorized "push to check");
+  CI run #4 green on lavapipe (phase_e/smoke/ssim_parity genuinely ran, 0
+  ignored). Then addressed the two open items the user raised.
+- F7 (gpu_cli vacuous): run_gpu now prints "dssim: gpu device: <name>" to
+  stderr; gpu_cli_matches_cpu asserts that POSITIVE line (not just absence of
+  the fallback note, which would rot on rewording). If absent, it probes
+  Vulkan in-process (dssim_vulkan::Context::new): no device -> SKIPPED with a
+  clear message; device present but --gpu fell back -> hard FAIL. Gated the
+  file on #![cfg(feature="gpu")]. Bonus F11: format check now asserts 8
+  fractional digits (no 1-digit-integer assumption). (commit fa7a99c)
+- F28 (peak VRAM): investigated first — img/mu/sq are pure GPU-write (never
+  CPU-written/read back) BUT persistent outputs compare() needs, so they can't
+  be arena-reused across scales; only rgba/tmp can, which is insufficient. So
+  the fix is submission boundaries, not aliasing. Added SPLIT_SUBMIT_MIN_PIXELS
+  (6M ~2450^2): create_image/create_image_gray/compare flush per scale at/above
+  it (transients free per scale -> back to ~72 B/px), batch below it (keeps the
+  small-image single-submit win; 2048^2 stays batched). (commit 231e96f)
+- F28 verification: split path is unreachable in CI at 6M px on lavapipe, so
+  added a test seam set_split_threshold_for_test(0) and
+  phase_e_split_submit_matches_batch_and_cpu — forces per-scale flush on small
+  images, asserts split == batch BIT-FOR-BIT (same passes, only fence
+  placement differs) and both == CPU, RGB + gray. Added 4096^2 to bench
+  (adaptive iters): runs clean, 0.45x CPU, valid score, no OOM.
+- Measured (RX 6600M): 320x200 0.58x, 1024^2 0.37x, 2048^2 0.42x, 4096^2 0.45x.
+- Verified: full workspace green WITH validation (0 vulkan errors, 15 suites);
+  clippy clean; new test is strictly stronger (no weakening).
+- Deviated from plan: none.
+- Blocked / open question: F28 VRAM reduction is analytical (per-scale flush
+  frees transients) + confirmed 4K runs, NOT measured byte-for-byte via vendor
+  tooling. Remaining Pass-1 findings not yet done: F13 (ICC claim wording),
+  F14/F15/F16/F17/F18/F19/F20 (doc/comment accuracy), F2 (fence leak on error),
+  F3 (compare dim assert — DONE this session via F29), F6 (Error::source),
+  F8 (gpu_cli cross-process lock), F21/F22 (CI validation+clippy legs), F23
+  (bench clippy — DONE), F24 (push — DONE).
+- Next: push F7+F28 to CI to confirm the new split test + gpu_cli hardening
+  pass on lavapipe (needs user's go-ahead per AGENTS.md §5). Then optionally
+  sweep the remaining low-severity Pass-1 doc/robustness findings.
