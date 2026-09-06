@@ -40,8 +40,10 @@ void main() {
     uint dst_row = y * pc.dims2.x + pc.dims2.y;   // dst_stride + dst plane offset (elems)
 
     // Reads used by the j=0 edge (also the tail of every other case's clamp).
-    // Row must already be padded to at least 3 readable elements per the
-    // CPU contract; for w < 3 the min() clamps replicate Rust's indexing.
+    // BH21: NO row padding is required -- the min(., last) clamps keep every
+    // index within [0, w-1] for any w >= 1, replicating Rust's clamped
+    // indexing. (An earlier note claimed a ">= 3 readable elements" CPU
+    // contract; that is unnecessary given the clamps.)
     if (x == 0u) {
         float p0 = src_data[src_row + 0u];
         float p1 = src_data[src_row + min(1u, last)];

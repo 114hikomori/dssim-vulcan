@@ -5,7 +5,11 @@
 // matching the CPU contract.
 //
 // Push constant layout (56 bytes):
-//   dims : uvec4  (width, height, src_stride, src_off)  // src is tight: src_stride=width, src_off=0
+//   dims : uvec4  (width, height, src_stride, src_off)
+//            BH20: src_stride (dims.z) is NOT read -- the source is always
+//            tightly packed (stride == width), so every row index uses `w`.
+//            Only dims.x (w), dims.y (h), dims.w (src_off) are used. Do not
+//            start passing a non-tight src_stride here without reading dims.z.
 //   dims2: uvec4  (dst_stride, dst_off, 0, 0)
 //   k1   : vec4   (K5_OUTER, K5_INNER, K5_MID, K5_EDGE_CENTER)
 //   k2   : vec2   (K5_EDGE_NEAR, K5_EDGE_FAR)

@@ -85,9 +85,14 @@ impl SsimPipelines {
 #[allow(clippy::too_many_arguments)]
 pub fn ssim_combine_pipelines(
     pipelines: &SsimPipelines,
+    // BH22: parameter order == binding order == the shader's set-0 layout
+    // (mu_o, mu_m, sq_o, sq_m, cross, dst). Previously the params were
+    // (mu_o, sq_o, mu_m, sq_m) while the vec bound (mu_o, mu_m, sq_o, sq_m) --
+    // a swap of two same-length stat buffers that no length assert could catch,
+    // producing a finite, plausible, WRONG map on any future "tidy up" edit.
     mu_o: &[f32],
-    sq_o: &[f32],
     mu_m: &[f32],
+    sq_o: &[f32],
     sq_m: &[f32],
     cross: &[f32],
     width: usize,
@@ -153,7 +158,7 @@ pub fn ssim_combine_gpu(
     let (mu_o, mu_m) = mu.split_at(pixels * num_channels);
     let (sq_o, sq_m) = sq_blur.split_at(pixels * num_channels);
     ssim_combine_pipelines(
-        &pipelines, mu_o, sq_o, mu_m, sq_m, cross, width, height, num_channels,
+        &pipelines, mu_o, mu_m, sq_o, sq_m, cross, width, height, num_channels,
     )
 }
 
@@ -164,9 +169,11 @@ impl SsimPipelines {
     pub(crate) fn combine_into<'a>(
         &'a self,
         passes: &mut Vec<Pass<'a>>,
+        // BH22: parameter order == binding order == the shader's set-0 layout
+        // (mu_o, mu_m, sq_o, sq_m, cross, dst). See ssim_combine_pipelines.
         mu_o: Buffer,
-        sq_o: Buffer,
         mu_m: Buffer,
+        sq_o: Buffer,
         sq_m: Buffer,
         cross: Buffer,
         dst: Buffer,
@@ -175,6 +182,24 @@ impl SsimPipelines {
         num_channels: usize,
     ) {
         assert!(num_channels == 1 || num_channels == 3, "DSSIM uses 1 or 3 channels");
+        // BH11: the five stat buffers each hold `num_channels` planes of pixels;
+        // dst holds one plane. Assert they cover the dispatch (descriptors bind
+        // the whole buffer, so a wrong plane is an invisible in-allocation OOB).
+        let pixels = width * height;
+        let stat_bytes = (num_channels * pixels * 4) as u64;
+        debug_assert!(
+            mu_o.size >= stat_bytes
+                && mu_m.size >= stat_bytes
+                && sq_o.size >= stat_bytes
+                && sq_m.size >= stat_bytes
+                && cross.size >= stat_bytes,
+            "combine_into: a stat buffer is smaller than {num_channels} planes"
+        );
+        debug_assert!(
+            dst.size >= (pixels * 4) as u64,
+            "combine_into: dst ({} B) too small for {width}x{height}",
+            dst.size
+        );
         let pipeline = match num_channels {
             3 => &self.combine3,
             _ => &self.combine1,

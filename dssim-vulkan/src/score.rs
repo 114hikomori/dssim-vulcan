@@ -464,8 +464,8 @@ impl GpuSsim {
             self.ssim.combine_into(
                 &mut passes,
                 ref_scale.mu.clone(),
-                ref_scale.sq_blur.clone(),
                 mod_scale.mu.clone(),
+                ref_scale.sq_blur.clone(),
                 mod_scale.sq_blur.clone(),
                 cross_all.clone(),
                 map_dst.clone(),

@@ -69,6 +69,21 @@ impl BlurPipelines {
         src_off: u32,
         dst_off: u32,
     ) {
+        // BH11: descriptors bind the WHOLE buffer, so a wrong offset is an
+        // in-allocation OOB that standard validation cannot see (GPU-Assisted is
+        // off). Assert the buffers are big enough for the max index this
+        // dispatch's (stride, offset, w, h) touches -- the class behind both
+        // historical M10 bugs.
+        debug_assert!(
+            src.size >= ((src_off as usize) + (height - 1) * stride + width) as u64 * 4,
+            "h5_into: src ({} B) too small for off={src_off} stride={stride} {width}x{height}",
+            src.size
+        );
+        debug_assert!(
+            tmp.size >= ((dst_off as usize) + height * width) as u64 * 4,
+            "h5_into: tmp ({} B) too small for dst_off={dst_off} {width}x{height}",
+            tmp.size
+        );
         let k5_ref = dssim_core::blur::K5_REF;
         passes.push(Pass::Compute {
             pipeline: &self.h5,
@@ -90,6 +105,18 @@ impl BlurPipelines {
         height: usize,
         dst_off: u32,
     ) {
+        // BH11: tmp is read tight (stride == width) from element 0; dst plane at
+        // dst_off. Assert both cover the max index the shader touches.
+        debug_assert!(
+            tmp.size >= (height * width) as u64 * 4,
+            "v5_into: tmp ({} B) too small for {width}x{height}",
+            tmp.size
+        );
+        debug_assert!(
+            dst.size >= ((dst_off as usize) + height * width) as u64 * 4,
+            "v5_into: dst ({} B) too small for dst_off={dst_off} {width}x{height}",
+            dst.size
+        );
         let k5_ref = dssim_core::blur::K5_REF;
         passes.push(Pass::Compute {
             pipeline: &self.v5,
@@ -100,6 +127,12 @@ impl BlurPipelines {
     }
 
     /// Push a single fused H5-multiply pass into a sequence (plane-offset aware).
+    ///
+    /// BH12: `src2` is read with the SAME stride as `src1` (`stride1`) -- the
+    /// shader supports independent strides (dims2.y) but this wrapper does not
+    /// expose one, because every caller blurs two planes of identical layout. If
+    /// a future caller needs `stride2 != stride1`, thread it through
+    /// `pc_mul_bytes`'s 5th argument (no shader change required).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn h5_mul_into<'a>(
         &'a self,
@@ -114,6 +147,23 @@ impl BlurPipelines {
         src2_off: u32,
         dst_off: u32,
     ) {
+        // BH11: assert all three buffers cover the max index the shader touches
+        // (src2 sized with stride1, per BH12's assumption).
+        debug_assert!(
+            src1.size >= ((src1_off as usize) + (height - 1) * stride1 + width) as u64 * 4,
+            "h5_mul_into: src1 ({} B) too small for off={src1_off} stride={stride1}",
+            src1.size
+        );
+        debug_assert!(
+            src2.size >= ((src2_off as usize) + (height - 1) * stride1 + width) as u64 * 4,
+            "h5_mul_into: src2 ({} B) too small (assumes stride2 == stride1)",
+            src2.size
+        );
+        debug_assert!(
+            tmp.size >= ((dst_off as usize) + height * width) as u64 * 4,
+            "h5_mul_into: tmp ({} B) too small for dst_off={dst_off}",
+            tmp.size
+        );
         let k5_ref = dssim_core::blur::K5_REF;
         passes.push(Pass::Compute {
             pipeline: &self.h5_mul,
@@ -126,6 +176,10 @@ impl BlurPipelines {
     /// strided (`stride >= width`); result is tightly packed.
     pub fn blur(&self, data: &[f32], width: usize, height: usize, stride: usize) -> Result<Vec<f32>> {
         assert!(width > 0 && height > 0);
+        // BH24: the length assert below passes even for stride < width, but then
+        // rows overlap and the shader reads in-bounds garbage where the CPU
+        // (imgref new_stride) would panic. Require stride >= width.
+        assert!(stride >= width, "blur: stride ({stride}) must be >= width ({width})");
         assert!(
             data.len() >= stride * (height - 1) + width,
             "buffer smaller than strided image"
@@ -177,6 +231,12 @@ impl BlurPipelines {
         stride2: usize,
     ) -> Result<Vec<f32>> {
         assert!(width > 0 && height > 0);
+        // BH24: see blur(). stride < width passes the length assert but overlaps
+        // rows -> in-bounds garbage on the GPU.
+        assert!(
+            stride1 >= width && stride2 >= width,
+            "blur_mul: strides ({stride1},{stride2}) must be >= width ({width})"
+        );
         assert!(
             src1.len() >= stride1 * (height - 1) + width
                 && src2.len() >= stride2 * (height - 1) + width,
@@ -266,9 +326,13 @@ pub fn blur_mul_gpu(
     pipelines.blur_mul(src1, src2, width, height, stride1, stride2)
 }
 
-/// Push-constant bytes with src/dst plane offsets (byte offsets into the
-/// bound buffers): dims = (width, height, src_stride_elems, src_off_elems),
-/// dims2 = (dst_stride_elems, dst_off_elems).
+/// Push-constant bytes with src/dst plane offsets. BH21: the offsets are
+/// ELEMENT offsets into the bound buffers (f32 units), NOT byte offsets -- the
+/// shader indexes `buffer[off + y*stride + x]` directly. dims =
+/// (width, height, src_stride_elems, src_off_elems), dims2 =
+/// (dst_stride_elems, dst_off_elems). A caller that "fixed" this to pass
+/// `off*4` would shift plane reads by 3x the plane size -- in-descriptor-range,
+/// validation-blind OOB.
 #[allow(clippy::too_many_arguments)]
 fn pc_bytes_off(
     width: usize,

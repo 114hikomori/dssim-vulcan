@@ -123,7 +123,26 @@ impl ColorPipelines {
         height: usize,
         channels: usize,
     ) {
-            let pc = pc_bytes(width, height, channels, &dssim_core::tolab::LAB_GPU_CONSTANTS);
+        // BH23: channels must be 1 or 3. The assert lived only in the
+        // rgba_to_lab_gpu host wrapper; lab_into is called directly by score.rs,
+        // so channels==2 here would take the shader's gray branch on an
+        // interleaved buffer -- silent garbage. Single choke point now.
+        assert!(channels == 1 || channels == 3, "DSSIM uses 1 or 3 channels");
+        // BH11: src is interleaved RGBA (4 floats/px) for 3ch, a single plane
+        // for 1ch; dst is `channels` planes. Assert both cover the dispatch.
+        let pixels = width * height;
+        let src_elems = if channels == 3 { pixels * 4 } else { pixels };
+        debug_assert!(
+            src.size >= (src_elems * 4) as u64,
+            "lab_into: src ({} B) too small for {width}x{height} {channels}ch",
+            src.size
+        );
+        debug_assert!(
+            dst.size >= (channels * pixels * 4) as u64,
+            "lab_into: dst ({} B) too small for {width}x{height} {channels}ch",
+            dst.size
+        );
+        let pc = pc_bytes(width, height, channels, &dssim_core::tolab::LAB_GPU_CONSTANTS);
         passes.push(Pass::Compute {
             pipeline: &self.to_lab,
             buffers: vec![src, dst],
