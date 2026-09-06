@@ -12,6 +12,10 @@ pub enum Error {
     NoDevice,
     /// A shader or pipeline problem.
     Shader(String),
+    /// BH3: a public-API caller passed arguments the backend can't honor (e.g.
+    /// a mismatched-size pair to `create_image_pair`). Distinct from `Shader`
+    /// (not a pipeline issue) and surfaced as `Err`, not a panic.
+    InvalidInput(String),
 }
 
 impl std::fmt::Display for Error {
@@ -22,6 +26,7 @@ impl std::fmt::Display for Error {
             Error::Allocator(e) => write!(f, "allocator: {e}"),
             Error::NoDevice => write!(f, "no compute-capable Vulkan device found"),
             Error::Shader(msg) => write!(f, "shader error: {msg}"),
+            Error::InvalidInput(msg) => write!(f, "invalid input: {msg}"),
         }
     }
 }
@@ -38,6 +43,7 @@ impl std::error::Error for Error {
             Error::Allocator(e) => Some(e),
             Error::NoDevice => None,
             Error::Shader(_) => None,
+            Error::InvalidInput(_) => None,
         }
     }
 }

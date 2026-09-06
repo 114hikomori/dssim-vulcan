@@ -23,6 +23,7 @@ use crate::pipeline::{dispatch_sequence, Pass};
 use crate::ssim::SsimPipelines;
 use crate::transfer::Buffer;
 use crate::Result;
+use crate::Error;
 
 use ash::vk;
 
@@ -120,9 +121,29 @@ impl GpuSsim {
         reference: &ImgVec<dssim_core::RGBAPLU>,
         modified: &ImgVec<dssim_core::RGBAPLU>,
     ) -> Result<(GpuSsimImage, GpuSsimImage)> {
+        // BH3: same-size precondition. compare() requires matching dims (F29);
+        // without this guard a small-reference + large-modified call would build
+        // the ENTIRE large pyramid in batch mode (the threshold below reads only
+        // `reference`) -- exactly the transient pile-up F28 exists to cap -- and
+        // the mismatch would only surface later as a PANIC in compare, not an
+        // Err. Reject up front.
+        if reference.width() != modified.width() || reference.height() != modified.height() {
+            return Err(Error::InvalidInput(format!(
+                "create_image_pair: reference {}x{} and modified {}x{} must have the same size",
+                reference.width(),
+                reference.height(),
+                modified.width(),
+                modified.height()
+            )));
+        }
         let mut passes: Vec<Pass> = Vec::new();
-        let flush_per_scale =
-            reference.width() * reference.height() >= self.split_min_pixels;
+        // BH18: the pair accumulates BOTH pyramids' transients in one submit, so
+        // its batch-mode peak is ~2x a single create's. Halve the effective
+        // threshold so a pair flushes per scale at half the single-image size,
+        // keeping the peak comparable to the F28 single-image guarantee. (Sizes
+        // are equal here, so one threshold covers both.)
+        let pixels = reference.width() * reference.height();
+        let flush_per_scale = pixels >= self.split_min_pixels / 2;
         let keep_a = self.push_rgb_scales(reference, &mut passes, flush_per_scale)?;
         let keep_b = self.push_rgb_scales(modified, &mut passes, flush_per_scale)?;
         if !passes.is_empty() {

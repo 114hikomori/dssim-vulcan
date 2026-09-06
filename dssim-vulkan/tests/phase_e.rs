@@ -373,3 +373,24 @@ fn phase_e_create_pair_split_matches_batch_and_cpu() {
         assert_parity("pair-split-vs-cpu", split_pair, cpu);
     }
 }
+
+
+/// BH3: create_image_pair rejects a mismatched-size pair with Err (not a later
+/// panic in compare), so the reference-only threshold can never build the
+/// larger pyramid in batch mode.
+#[test]
+fn phase_e_create_pair_rejects_size_mismatch() {
+    let _gpu = gpu_lock();
+    let context = Arc::new(Context::new().expect("context"));
+    let gpu = GpuSsim::new(context).unwrap();
+    let big = synth_rgba(64, 64, 0xAAAA_BBBB);
+    let small = synth_rgba(64, 63, 0xCCCC_DDDD);
+    let err = gpu
+        .create_image_pair(&big, &small)
+        .err()
+        .expect("expected Err for a mismatched-size pair");
+    assert!(
+        matches!(err, dssim_vulkan::Error::InvalidInput(_)),
+        "expected InvalidInput, got {err:?}"
+    );
+}
