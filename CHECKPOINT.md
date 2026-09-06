@@ -671,3 +671,29 @@ Milestone ids refer to `dssim-vulkan-fable-plan.md` §16 (also listed in `AGENTS
 - Pushing fbf67f8 (audit pass 6) + 61bd7c8 (F34 fix) + ca5321f (P5 close) + this
   entry. F34 is behavior-neutral on CI's unified llvmpipe (contains() still true
   -> zero-copy path unchanged), so run #12 is expected to mirror #11 green.
+
+## 2026-09-07 — Deep bug hunt (BH1-BH35) fully fixed
+- AUDIT_DEEP_BUGHUNT.md (5 parallel sub-agents, main-verified) recorded BH1-BH35.
+  All 35 dispositioned across 8 grouped commits (G1-G8 + BH17), each verified:
+  full workspace green WITH validation (0 vulkan errors, 15 suites), clippy
+  --no-deps -D warnings clean, no .spv bytes changed (shader edits comment-only).
+- HIGH: BH1 (illegal cmdbuf free + descriptor-pool leak-to-brick -> reset-before-
+  free + PoolReset Drop guard), BH2 (workgroup/storage limits never queried ->
+  query+enforce+CPU-fallback).
+- Notable: BH5 (Sync but unsynchronized submit -> submit_lock mutex, PROVEN by a
+  new 4-thread concurrency test all-byte-identical); BH9 (README/lib.rs/PERF
+  claimed 16-bit=8-bit -> FALSE, full LUT precision, corrected + pinned by a
+  generated-16-bit-PNG precision test); BH22 (combine param order != binding
+  order, a silent-wrong-map footgun -> params reordered to bind-order, behavior-
+  preserving); BH11 (no size validation in *_into wrappers -- the class behind
+  both M10 bugs -> debug_assert formulas, 0 false fires).
+- Judgment calls: BH31 (constant duplication) documented + parity-suite-is-the-
+  guard, full push-constant migration deferred per audit ordering; BH32 (non-
+  finite select divergence) documented note-only per audit.
+- Test-integrity: BH7/BH8/BH16/BH34/BH17 closed vacuous-pass and untested-guard
+  gaps (GPU stdout fmt, identity floor, F29 should_panic, pair x split, CLI split).
+- Deviated from plan: none (fixes follow the audit's recommended order/groups).
+- Blocked / open question: none.
+- Next: push the 10 bug-hunt commits (needs the user's word) + watch CI -- the
+  new BH6 staging leg (DSSIM_UNIFIED=0) and BH5 concurrency test run there for
+  the first time.

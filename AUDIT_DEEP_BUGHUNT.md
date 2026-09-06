@@ -337,3 +337,54 @@ blur-level tiny sweeps exist), odd dims at ≥6M px.
   are the residual-risk list, not confirmed defects.
 - Severity reflects mechanism × reachability today; several MEDIUMs are
   "public API footgun, no current caller hits it."
+
+---
+
+## Resolution (fixes applied, 2026-09-07)
+
+All BH1–BH35 dispositioned across 8 grouped commits; every step verified with
+the full workspace green **with validation** (0 Vulkan errors, 15 suites) +
+clippy `--no-deps -D warnings` clean. No `.spv` bytes changed (shader edits were
+comment-only).
+
+| BH | fix | commit |
+|---|---|---|
+| BH1 | reset-before-free + PoolReset Drop guard (pool reset on every exit path) | 1ca1748 |
+| BH2 | query+enforce workgroup/storage limits; CLI CPU-fallback | 5fd7a2c |
+| BH3 | create_image_pair same-size guard (Error::InvalidInput) | ec26776 |
+| BH4 | device_wait_idle before fence destroy on wait error | 1ca1748 |
+| BH5 | submit_lock mutex; proven by 4-thread concurrency test | f012a2b |
+| BH6 | log effective upload path + warn bad override + CI staging leg | 9673f72 |
+| BH7 | format check on GPU stdout too | 89d3150 |
+| BH8 | assert!(scale>0) floor on identity test | 89d3150 |
+| BH9 | 16-bit is full precision; docs corrected + precision test | ab5cdd3 |
+| BH10 | VkGuard tears down instance/device/messenger on error | 1ca1748 |
+| BH11 | debug_assert required-size formulas per *_into wrapper | 07be109 |
+| BH12 | h5_mul_into stride2==stride1 assumption documented + sized | 07be109 |
+| BH13 | -o honored in both CPU fallbacks; warning moved post-context | ab5cdd3 |
+| BH14 | warn when --gpu given but feature off | ab5cdd3 |
+| BH15 | bench cli_ms/cli_ratio column (real CLI shape) | ab5cdd3 |
+| BH16 | two #[should_panic] tests for the F29 compare asserts | 89d3150 |
+| BH17 | #[ignore]d 2500² CLI split-path test (verified: diff 1.4e-7) | f17d515 |
+| BH18 | halved pair threshold (peak comparable to single-image F28) | ec26776 |
+| BH19 | MAX_SETS comment: pair doubles worst case to ~80 | 1ca1748 |
+| BH20 | blur_v5.comp: dims.z unused, contract made explicit | 07be109 |
+| BH21 | pc_bytes_off element-not-byte offsets; h5 padding note fixed | 07be109 |
+| BH22 | combine params reordered to bind-order (behavior-preserving) | 07be109 |
+| BH23 | channels assert moved into lab_into | 07be109 |
+| BH24 | blur()/blur_mul() assert stride >= width | 07be109 |
+| BH25 | alloc_buffer frees allocation+buffer on bind failure | 1ca1748 |
+| BH26 | record-closure asserts converted to Err returns | 1ca1748 |
+| BH27 | mapped-I/O bounds hard asserts; read_bytes checked | 1ca1748 |
+| BH28 | gpu_elapsed_ms returns NaN when timestampPeriod==0 | 1ca1748 |
+| BH29 | poison-tolerant lock_allocator() at all four sites incl. Drop | f012a2b |
+| BH30 | record_pass requires exact, 4-aligned push | 1ca1748 |
+| BH31 | constant duplication documented; parity suites are the drift guard; full push-constant migration deferred (judgment call) | f012a2b |
+| BH32 | non-finite select divergence documented (note-only, per audit) | f012a2b |
+| BH33 | blur.rs/ssim.rs module docs updated to the *_into production path | ab5cdd3 |
+| BH34 | create_image_pair x split test | 89d3150 |
+| BH35 | CLI identity/1-vs-N/decode-error/gray + tiny-RGB tests | ab5cdd3 |
+
+Deferred by design (audit's own ordering): BH31 full push-constant migration
+(refactor risk; drift already caught by parity), BH5 was fixed with a mutex
+rather than deferred since it's cheap and makes the Sync claim honest.
