@@ -491,3 +491,40 @@ Milestone ids refer to `dssim-vulkan-fable-plan.md` §16 (also listed in `AGENTS
 - Blocked / open question: M10 sign-off still awaits integrated-GPU + CI
   lavapipe run #8 confirmation (per 878de7a).
 - Next: watch CI run #8; then M8 CLI/fallback integration per plan.
+
+## 2026-09-06 — M10 SIGNED OFF (exit-observation verified on both GPUs + CI)
+- M10 exit-observation: "optimized path beats measured CPU baseline." Now
+  observed on all three validation targets, not inferred:
+  * Discrete RX 6600M: GPU/CPU 0.34-0.58x across 320x200..4096^2 (bench).
+  * Integrated AMD Radeon Graphics: 0.46x (320x200), 0.52x (1024^2), 0.52x
+    (2048^2), 0.57x (4096^2) -- GPU wins at every size incl 4K (bench, new
+    DSSIM_BENCH_DEVICE pin; commit de47c41).
+  * CI lavapipe: full parity suite green (run #8), validation ENABLED, 0 errors.
+- Parity held throughout: dssim_check identical across both GPUs and to CPU
+  within 5e-6; full workspace green WITH validation + --nocapture (0 vulkan
+  errors, validation ENABLED 71x, 15 suites, 0 ignored).
+- fable-judge on the M10 claim (this session's work, acf9fca..HEAD):
+  * Test-weakening hunt: only two test files touched (phase_e.rs, gpu_cli.rs);
+    every change is an ADDED test or a strictness-neutral adaptation; the F11
+    format check got STRICTER (frac.len()==8). TOL unchanged at 5e-6. No
+    assertions deleted/loosened, no skips added.
+  * Verification re-run by the judge, not trusted: fresh bench (both GPUs) +
+    fresh full-workspace test with validation -- both reproduce.
+  * Scope: all changes trace to the Phase-H optimization + audit findings; no
+    unrelated drive-by edits. The one new knob (DSSIM_BENCH_DEVICE) is test/
+    tooling-only, default behavior unchanged.
+  * Outward actions: 5 pushes this session, each preceded by the user's own
+    "push"/"push to check" (quoted at the time). No un-authorized remote change.
+  * Debris: none -- debug probes removed, dead pack_f32 removed, .spv hash-match,
+    clippy clean. Only untracked item is .serena/ (tool dir, correctly not
+    committed).
+- Verdict: VERIFIED. M10 met. All milestones M0-M10 complete; audit F1-F33 +
+  P1-P3 dispositioned. No open correctness or milestone items.
+- Honest residual caveats (not blockers, logged): F28 byte-level VRAM reduction
+  is measured at 512^2 (6.27MB saved, deterministic) and extrapolated to ~400MB
+  at 4K, not measured at 4K directly; F1's flush branch is unexercised on this
+  HOST_COHERENT host; 16-bit GPU inputs are an 8-bit approximation (README
+  caveat, non-goal).
+- Next: none required for M10. Deferred-by-design (need profiling justification
+  per AGENTS.md §8): sub-scale 4K chunking below ~72 B/px, GPU-side pooling,
+  GPU image decode. Optional: tag a release (needs explicit user instruction).
