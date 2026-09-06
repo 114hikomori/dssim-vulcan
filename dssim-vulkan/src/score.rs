@@ -32,6 +32,19 @@ use dssim_core::Downsample as _;
 /// Pooling weights, transcribed from dssim.rs:85 (`DEFAULT_WEIGHTS`).
 pub const DEFAULT_WEIGHTS: [f64; 5] = [0.028, 0.197, 0.322, 0.298, 0.155];
 
+/// Adaptive submit granularity (F28). A single batched submit keeps every
+/// scale's per-scale transients (`staging`/`rgba`/`tmp` in create;
+/// `tmp`/`cross`/`map` in compare) alive until the one fence returns -- great
+/// for small images (fewest fences, the Phase-H overhead win) but a VRAM
+/// liability at 4K+ (create footprint ~96 B/px summed over the pyramid vs
+/// ~72 B/px if transients free per scale). At or above this scale-0 pixel
+/// count, flush after every scale so only one scale's transients are live at a
+/// time. The persistent outputs (`img`/`mu`/`sq`) still accumulate across all
+/// scales -- `compare` needs them -- so this removes the *excess*, not the
+/// algorithm's inherent working set. 6 M px (~2450^2) keeps 2048^2 (4.2 M px,
+/// ~400 MB) on the fast single-submit path and splits 4K (16.8 M px) and up.
+const SPLIT_SUBMIT_MIN_PIXELS: usize = 6_000_000;
+
 /// Final DSSIM conversion, transcribed from dssim.rs:439.
 pub fn to_dssim(ssim: f64) -> f64 {
     1.0 / ssim.max(f64::EPSILON) - 1.0
@@ -57,6 +70,11 @@ pub struct GpuSsim {
     blur: BlurPipelines,
     color: crate::color::ColorPipelines,
     ssim: SsimPipelines,
+    /// Scale-0 pixel count at/above which `create_image`/`compare` flush per
+    /// scale instead of batching all scales into one submit (F28). Defaults to
+    /// `SPLIT_SUBMIT_MIN_PIXELS`; a test seam lowers it to exercise the split
+    /// path on a small image (CI-safe) and prove split == batch == CPU.
+    split_min_pixels: usize,
 }
 
 impl GpuSsim {
@@ -64,7 +82,14 @@ impl GpuSsim {
         let blur = BlurPipelines::new(&context)?;
         let color = crate::color::ColorPipelines::new(&context)?;
         let ssim = SsimPipelines::new(&context)?;
-        Ok(Self { context, blur, color, ssim })
+        Ok(Self { context, blur, color, ssim, split_min_pixels: SPLIT_SUBMIT_MIN_PIXELS })
+    }
+
+    /// Test-only: force the split-submit path by lowering the threshold (0 =
+    /// always flush per scale). Not part of the public contract.
+    #[doc(hidden)]
+    pub fn set_split_threshold_for_test(&mut self, min_pixels: usize) {
+        self.split_min_pixels = min_pixels;
     }
 
     /// Materialize the whole pyramid in ONE GPU submit: per scale, staging
@@ -77,6 +102,10 @@ impl GpuSsim {
         let mut current: Option<ImgVec<dssim_core::RGBAPLU>> = Some(src.clone());
 
         let mut passes: Vec<Pass> = Vec::new();
+        // F28: batch all scales in one submit for small/medium images; flush
+        // per scale at/above the threshold so large-image transients don't all
+        // pile up. See `SPLIT_SUBMIT_MIN_PIXELS` for the rationale.
+        let flush_per_scale = src.width() * src.height() >= self.split_min_pixels;
 
         let mut keep: Vec<ScaleKeep> = Vec::new();
 
@@ -170,10 +199,19 @@ impl GpuSsim {
                 mu: mu_all,
                 sq: sq_all,
             });
+            // F28: in split mode, submit this scale now and drop the pass
+            // records so its transients (staging/rgba/tmp) free immediately;
+            // the outputs survive via `keep`. In batch mode, keep accumulating.
+            if flush_per_scale {
+                dispatch_sequence(&self.context, &passes)?;
+                passes.clear();
+            }
             current = img.downsample();
         }
 
-        dispatch_sequence(&self.context, &passes)?;
+        if !passes.is_empty() {
+            dispatch_sequence(&self.context, &passes)?;
+        }
 
         Ok(GpuSsimImage {
             scales: keep
@@ -194,7 +232,9 @@ impl GpuSsim {
     /// `GBitmap::to_lab` (the x1.16 branch). One GPU submit for all scales.
     pub fn create_image_gray(&self, src: &ImgVec<f32>) -> Result<GpuSsimImage> {
         let mut passes: Vec<Pass> = Vec::new();
-        
+        // F28: same adaptive granularity as the RGB path.
+        let flush_per_scale = src.width() * src.height() >= self.split_min_pixels;
+
         let mut keep: Vec<ScaleKeep> = Vec::new();
         let mut current: Option<ImgVec<f32>> = Some(src.clone());
 
@@ -257,10 +297,16 @@ impl GpuSsim {
             self.blur.v5_into(&mut passes, tmp.clone(), sq.clone(), w, h, 0);
 
             keep.push(ScaleKeep { width: w, height: h, channels: 1, img: lab, mu, sq });
+            if flush_per_scale {
+                dispatch_sequence(&self.context, &passes)?;
+                passes.clear();
+            }
             current = img.downsample();
         }
 
-        dispatch_sequence(&self.context, &passes)?;
+        if !passes.is_empty() {
+            dispatch_sequence(&self.context, &passes)?;
+        }
 
         Ok(GpuSsimImage {
             scales: keep
@@ -278,14 +324,23 @@ impl GpuSsim {
     }
 
     /// Compare a reference image with a modified one; returns the final
-    /// DSSIM score. ONE GPU submit for all scales: per scale, the three
-    /// channel cross-blurs and the SSIM combine run on the GPU-resident
-    /// planes; only the per-scale SSIM maps come back for CPU pooling in f64.
-    /// Note the scale-0 map is full-resolution (≈16 MB at 2048²; ≈4/3·P0·4B
-    /// summed over scales), so this is not a negligible transfer — pooling on
-    /// the GPU is a standing non-goal (AGENTS.md §8) pending profiling.
+    /// DSSIM score. Per scale, the three channel cross-blurs and the SSIM
+    /// combine run on the GPU-resident planes; only the per-scale SSIM maps
+    /// come back for CPU pooling in f64. Small/medium images batch all scales
+    /// into ONE submit (F28 threshold); large images flush per scale to cap
+    /// transient VRAM. Note the scale-0 map is full-resolution (≈16 MB at
+    /// 2048²; ≈4/3·P0·4B summed over scales), so this is not a negligible
+    /// transfer — pooling on the GPU is a standing non-goal (AGENTS.md §8)
+    /// pending profiling.
     pub fn compare(&self, reference: &GpuSsimImage, modified: &GpuSsimImage) -> Result<f64> {
         let mut passes: Vec<Pass> = Vec::new();
+        // F28: same adaptive granularity as create_image.
+        let scale0_pixels = reference
+            .scales
+            .first()
+            .map(|s| s.width * s.height)
+            .unwrap_or(0);
+        let flush_per_scale = scale0_pixels >= self.split_min_pixels;
 
         let mut map_readbacks: Vec<(Buffer, usize, usize, usize)> = Vec::new(); // (rb, w, h, scale_n)
 
@@ -354,9 +409,18 @@ impl GpuSsim {
 
             passes.push(Pass::CopyBuffer { src: map_dst.clone(), dst: map_rb.clone() });
             map_readbacks.push((map_rb, ref_scale.width, ref_scale.height, n));
+            // F28: in split mode, submit this scale now; the map readback
+            // survives via `map_readbacks`, and this scale's tmp/cross/map_dst
+            // free when `passes` is cleared.
+            if flush_per_scale {
+                dispatch_sequence(&self.context, &passes)?;
+                passes.clear();
+            }
         }
 
-        dispatch_sequence(&self.context, &passes)?;
+        if !passes.is_empty() {
+            dispatch_sequence(&self.context, &passes)?;
+        }
 
         // Pool on CPU from the downloaded maps (order: scale n ascending —
         // map_readbacks was built in scale order).

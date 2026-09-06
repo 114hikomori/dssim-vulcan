@@ -155,8 +155,52 @@ fn phase_e_small_and_odd_sizes() {
     }
 }
 
+/// F28: exercise the per-scale flush path (normally only reached at
+/// >= SPLIT_SUBMIT_MIN_PIXELS, far too slow for lavapipe CI) by forcing the
+/// threshold to 0 on small images, and prove split == batch == CPU for both
+/// the RGB and gray create paths plus compare. The passes are identical in
+/// both modes -- only submission boundaries differ -- so split and batch must
+/// agree bit-for-bit.
 #[test]
-fn phase_e_cpu_reference_parity() {    let _gpu = gpu_lock();
+fn phase_e_split_submit_matches_batch_and_cpu() {
+    let _gpu = gpu_lock();
+    let img1 = decode_rgba("../tests/test1-sm.png");
+    let img2 = decode_rgba("../tests/test2-sm.png");
+    let g1 = synth_gray(96, 80, 0x1234_5678);
+    let g2 = synth_gray(96, 80, 0x9ABC_DEF0);
+    let cpu_rgb = cpu_score(&img1, &img2);
+    let cpu_gray = cpu_score(&g1, &g2);
+
+    for (dev_idx, context) in all_devices() {
+        // --- RGB: batch (default) vs split (threshold 0) vs CPU ---
+        let gpu_batch = GpuSsim::new(context.clone()).unwrap();
+        let rb = gpu_batch.create_image(&img1).unwrap();
+        let mb = gpu_batch.create_image(&img2).unwrap();
+        let batch = gpu_batch.compare(&rb, &mb).unwrap();
+
+        let mut gpu_split = GpuSsim::new(context.clone()).unwrap();
+        gpu_split.set_split_threshold_for_test(0);
+        let rs = gpu_split.create_image(&img1).unwrap();
+        let ms = gpu_split.create_image(&img2).unwrap();
+        let split = gpu_split.compare(&rs, &ms).unwrap();
+
+        assert_parity("rgb split-vs-cpu", split, cpu_rgb);
+        assert_parity("rgb batch-vs-cpu", batch, cpu_rgb);
+        assert_eq!(batch, split, "device {dev_idx}: rgb split {split} != batch {batch}");
+
+        // --- Gray: split (threshold 0) vs CPU (exercises create_image_gray flush) ---
+        let mut gpu_gsplit = GpuSsim::new(context).unwrap();
+        gpu_gsplit.set_split_threshold_for_test(0);
+        let rg = gpu_gsplit.create_image_gray(&g1).unwrap();
+        let mg = gpu_gsplit.create_image_gray(&g2).unwrap();
+        assert_parity("gray split-vs-cpu", gpu_gsplit.compare(&rg, &mg).unwrap(), cpu_gray);
+        let _ = dev_idx;
+    }
+}
+
+#[test]
+fn phase_e_cpu_reference_parity() {
+    let _gpu = gpu_lock();
     let img1 = decode_rgba("../tests/test1-sm.png");
     let img2 = decode_rgba("../tests/test2-sm.png");
     let alpha1 = decode_rgba("../tests/alpha1.png");

@@ -61,14 +61,16 @@ fn main() {
         context.device_type()
     );
 
-    let sizes: &[(usize, usize)] = &[(320, 200), (1024, 1024), (2048, 2048)];
-    let iters = 7;
+    let sizes: &[(usize, usize)] = &[(320, 200), (1024, 1024), (2048, 2048), (4096, 4096)];
     println!(
         "{:>12} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}",
         "image", "cpu_ms", "gpu_ms", "ratio", "create_ms", "compare_ms", "dssim_check"
     );
 
     for &(w, h) in sizes {
+        // Fewer iterations for very large images (4K create+compare is ~1s/op;
+        // 7 iters x several timings would take minutes and stress TDR).
+        let iters = if w * h >= 8_000_000 { 1 } else { 7 };
         let (a, b) = noise_pair(w, h, 0x1234_5678 ^ w as u64);
 
         // CPU baseline: decode excluded; create_image x2 + compare.
