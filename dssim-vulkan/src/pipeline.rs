@@ -108,10 +108,13 @@ impl ComputePipeline {
             // cap must cover the most a single sequence ever uses for one
             // pipeline. Worst case is `create_image`'s `v5` usage: (2 chroma +
             // channels mu + channels sq) per scale x scales = (2+3+3)*5 = 40
-            // for the 5-scale / 3-channel DSSIM plan. 128 gives 3x headroom
-            // for any realistic scale/channel growth. This is NOT dynamic:
-            // exceeding it fails `allocate_descriptor_sets` mid-sequence, so
-            // raise it together with any change to the batching plan.
+            // for the 5-scale / 3-channel DSSIM plan. BH19: `create_image_pair`
+            // (T11) accumulates BOTH images' passes in one submit, doubling the
+            // per-pipeline peak to ~80 -- still under 128, but the headroom is
+            // now ~1.6x, not 3x. This is NOT dynamic: exceeding it fails
+            // `allocate_descriptor_sets` mid-sequence (and BH1's guard now
+            // recycles the pool on that error path), so raise it together with
+            // any change to the batching plan.
             const MAX_SETS_PER_POOL: u32 = 128;
             let pool_sizes = [vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::STORAGE_BUFFER,
@@ -162,9 +165,29 @@ impl ComputePipeline {
     /// The descriptor set is allocated from this pipeline's pool and freed
     /// by the pool reset in [`dispatch_sequence`].
     fn record_pass(&self, cb: vk::CommandBuffer, buffers: &[Buffer], push: &[u8], groups: u32) -> Result<()> {
-        assert_eq!(buffers.len() as u32, self.binding_count, "buffer count must match binding count");
-        if push.len() as u32 > self.push_constant_size {
-            return Err(Error::Shader("push constant overflow".into()));
+        // BH26: caller-bug guards. These run inside the record closure, so a
+        // panic would bypass submit_one_shot's cleanup and leave the buffer
+        // recording -- return Err instead (the record API's Result contract).
+        if buffers.len() as u32 != self.binding_count {
+            return Err(Error::Shader(format!(
+                "record_pass: {} buffers for {} bindings",
+                buffers.len(),
+                self.binding_count
+            )));
+        }
+        // BH30: require an exact, 4-aligned push. Overflow alone was checked
+        // before; a SHORT push leaves the shader's tail constants undefined,
+        // and size%4!=0 violates VUID-vkCmdPushConstants-size-00369. All
+        // builders emit exact sizes today, so this only catches future drift.
+        if push.len() as u32 != self.push_constant_size {
+            return Err(Error::Shader(format!(
+                "record_pass: push {} bytes != declared {} (short or overflowing)",
+                push.len(),
+                self.push_constant_size
+            )));
+        }
+        if !push.len().is_multiple_of(4) {
+            return Err(Error::Shader("record_pass: push size not a multiple of 4".into()));
         }
         unsafe {
             let device = &self.context.device;
@@ -236,8 +259,29 @@ pub enum Pass<'a> {
 /// Determinism-over-speed: no overlap, no pipelining. Many passes per submit
 /// is the point — one fence wait amortizes the whole sequence.
 pub fn dispatch_sequence(context: &Arc<Context>, passes: &[Pass<'_>]) -> Result<()> {
-    struct ResetPool<'a>(&'a ComputePipeline);
-    let mut used_pipelines: Vec<ResetPool<'_>> = Vec::new();
+    // BH1: recycle each used pipeline's descriptor pool on EVERY exit path. A
+    // mid-sequence failure (record_pass Err, submit error, timing-read error)
+    // previously returned before the reset loop, leaking the sets allocated so
+    // far toward MAX_SETS_PER_POOL -- after enough failures the pipeline bricks
+    // until process exit. The guard resets on drop: success, error, or unwind.
+    struct PoolReset<'a> {
+        pipelines: Vec<&'a ComputePipeline>,
+    }
+    impl Drop for PoolReset<'_> {
+        fn drop(&mut self) {
+            unsafe {
+                for p in self.pipelines.drain(..) {
+                    // Best-effort: a reset failure (e.g. device-lost) must not
+                    // mask the original error the caller is already returning.
+                    let _ = p.context.device.reset_descriptor_pool(
+                        p.descriptor_pool,
+                        vk::DescriptorPoolResetFlags::empty(),
+                    );
+                }
+            }
+        }
+    }
+    let mut reset = PoolReset { pipelines: Vec::new() };
     let timed = context.timing_enabled.load(std::sync::atomic::Ordering::Relaxed);
 
     context.submit_one_shot(|cb| unsafe {
@@ -260,19 +304,23 @@ pub fn dispatch_sequence(context: &Arc<Context>, passes: &[Pass<'_>]) -> Result<
             };
             match pass {
                 Pass::Compute { pipeline, buffers, push, groups } => {
-                    if !used_pipelines.iter().any(|ResetPool(p)| std::ptr::eq(*p, *pipeline)) {
-                        used_pipelines.push(ResetPool(pipeline));
+                    if !reset.pipelines.iter().any(|p| std::ptr::eq(*p, *pipeline)) {
+                        reset.pipelines.push(pipeline);
                     }
                     pipeline.record_pass(cb, buffers, push, *groups)?;
                 }
                 Pass::CopyBuffer { src, dst } => {
-                    // F32: every call site copies a whole buffer; a size
+                    // F32/BH26: every call site copies a whole buffer; a size
                     // mismatch is a bug, not something to silently truncate.
-                    assert_eq!(
-                        src.size, dst.size,
-                        "CopyBuffer size mismatch ({} vs {}): would silently truncate",
-                        src.size, dst.size
-                    );
+                    // Return Err (not assert): a panic inside this closure would
+                    // bypass submit_one_shot's cleanup and leave the buffer
+                    // in the recording state.
+                    if src.size != dst.size {
+                        return Err(Error::Shader(format!(
+                            "CopyBuffer size mismatch ({} vs {}): would silently truncate",
+                            src.size, dst.size
+                        )));
+                    }
                     let region = vk::BufferCopy {
                         src_offset: 0,
                         dst_offset: 0,
@@ -339,16 +387,10 @@ pub fn dispatch_sequence(context: &Arc<Context>, passes: &[Pass<'_>]) -> Result<
         }
     }
 
-    // Descriptor sets were consumed; recycle the pools.
-    for ResetPool(pipeline) in &used_pipelines {
-        unsafe {
-            pipeline
-                .context
-                .device
-                .reset_descriptor_pool(pipeline.descriptor_pool, vk::DescriptorPoolResetFlags::empty())
-                .map_err(Error::Vulkan)?;
-        }
-    }
+    // BH1: descriptor-pool recycling happens in `reset`'s Drop (which also
+    // covers the error paths), so there is nothing left to do but return; the
+    // guard drops now, after the fence has already been waited inside
+    // submit_one_shot (so no set is in-flight when its pool is reset).
     Ok(())
 }
 

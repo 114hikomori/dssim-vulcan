@@ -103,9 +103,19 @@ impl Context {
                 }
             };
 
-            self.device
-                .bind_buffer_memory(buffer, allocation.memory(), allocation.offset())
-                .map_err(Error::Vulkan)?;
+            // BH25: mirror the allocate-failure arm above -- on bind failure,
+            // free the allocation and destroy the buffer, or both leak.
+            if let Err(e) =
+                self.device.bind_buffer_memory(buffer, allocation.memory(), allocation.offset())
+            {
+                let mut allocator = self.allocator.lock().expect("allocator mutex poisoned");
+                let _ = allocator
+                    .as_mut()
+                    .expect("allocator not yet dropped")
+                    .free(allocation);
+                self.device.destroy_buffer(buffer, None);
+                return Err(Error::Vulkan(e));
+            }
 
             // F28 measurement: track live + peak allocation bytes (a
             // deterministic proxy for VRAM footprint).
@@ -273,8 +283,11 @@ pub(crate) fn write_mapped(buffer: &Buffer, data: &[u8]) -> Result<()> {
     let ptr = allocation
         .mapped_ptr()
         .ok_or_else(|| Error::Allocator(gpu_allocator::AllocationError::FailedToMap("allocation not host-mapped".into())))?;
-    debug_assert!(data.len() as u64 <= buffer.size, "staging write exceeds buffer size");
-    // SAFETY: the allocation is at least `data.len()` bytes (we sized it),
+    // BH27: hard assert (not debug_assert) -- a violation is an out-of-bounds
+    // write into mapped memory, so panicking beats silently corrupting in
+    // release. All current call sites are exact-sized.
+    assert!(data.len() as u64 <= buffer.size, "staging write exceeds buffer size");
+    // SAFETY: the allocation is at least `data.len()` bytes (checked above),
     // host-visible (CpuToGpu), and currently mapped by gpu-allocator.
     unsafe {
         std::ptr::copy_nonoverlapping(data.as_ptr(), ptr.as_ptr().cast::<u8>(), data.len());
@@ -291,8 +304,10 @@ pub(crate) fn write_mapped_f32_with<F: FnOnce(&mut [f32])>(buffer: &Buffer, coun
     let ptr = allocation
         .mapped_ptr()
         .ok_or_else(|| Error::Allocator(gpu_allocator::AllocationError::FailedToMap("allocation not host-mapped".into())))?;
-    debug_assert!((count * 4) as u64 <= buffer.size, "staging f32 write exceeds buffer size");
-    // SAFETY: allocation is host-visible, mapped, and at least `count*4` bytes.
+    // BH27: hard assert -- see write_mapped.
+    assert!((count * 4) as u64 <= buffer.size, "staging f32 write exceeds buffer size");
+    // SAFETY: allocation is host-visible, mapped, and at least `count*4` bytes
+    // (checked above).
     let slice = unsafe { std::slice::from_raw_parts_mut(ptr.as_ptr().cast::<f32>(), count) };
     f(slice);
     sync_host_range(buffer, true)
@@ -305,8 +320,10 @@ pub(crate) fn read_bytes(buffer: &Buffer, len: usize) -> Result<Vec<u8>> {
     let ptr = allocation
         .mapped_ptr()
         .ok_or_else(|| Error::Allocator(gpu_allocator::AllocationError::FailedToMap("allocation not host-mapped".into())))?;
-    // SAFETY: allocation is at least `len` bytes, host-visible (GpuToCpu),
-    // mapped; the queue finished (fence) before this read.
+    // BH27: read_bytes trusted `len` entirely; assert it against the buffer.
+    assert!(len as u64 <= buffer.size, "read_bytes len exceeds buffer size");
+    // SAFETY: allocation is at least `len` bytes (checked above), host-visible
+    // (GpuToCpu), mapped; the queue finished (fence) before this read.
     Ok(unsafe { std::slice::from_raw_parts(ptr.as_ptr().cast::<u8>(), len) }.to_vec())
 }
 

@@ -76,6 +76,48 @@ pub struct Context {
     entry: ash::Entry,
 }
 
+/// BH10: ash 0.38 gives `Instance`/`Device` no `Drop`, so every `?` between
+/// `create_instance` and the successful return leaked the VkInstance, the debug
+/// messenger, and (once created) the VkDevice. This guard destroys them on any
+/// early return; on success `disarm` takes the handles out so `Drop` is a no-op
+/// and `Context` owns them. `vkDestroyDevice` implicitly frees the query and
+/// command pools created from it, so those need no separate arm. The `entry`
+/// local outlives this guard (declared first, dropped last), so the teardown
+/// calls still reach the loader.
+struct VkGuard {
+    device: Option<ash::Device>,
+    loader: Option<debug_utils::Instance>,
+    messenger: Option<vk::DebugUtilsMessengerEXT>,
+    instance: Option<ash::Instance>,
+}
+
+impl VkGuard {
+    fn disarm(mut self) -> (ash::Device, Option<debug_utils::Instance>, Option<vk::DebugUtilsMessengerEXT>, ash::Instance) {
+        (
+            self.device.take().expect("device created before success"),
+            self.loader.take(),
+            self.messenger.take(),
+            self.instance.take().expect("instance created before success"),
+        )
+    }
+}
+
+impl Drop for VkGuard {
+    fn drop(&mut self) {
+        unsafe {
+            if let Some(d) = self.device.take() {
+                d.destroy_device(None);
+            }
+            if let (Some(l), Some(m)) = (self.loader.take(), self.messenger.take()) {
+                l.destroy_debug_utils_messenger(m, None);
+            }
+            if let Some(i) = self.instance.take() {
+                i.destroy_instance(None);
+            }
+        }
+    }
+}
+
 impl Context {
     /// Create a context on the best device per the selection policy.
     pub fn new() -> Result<Self, Error> {
@@ -160,6 +202,18 @@ impl Context {
                 (None, None)
             };
 
+            // BH10: guard the instance + messenger from here on. Every `?`
+            // below until the successful return tears them down (and the device,
+            // once created) rather than leaking them. The `NoDevice` path in
+            // particular is a supported production path (device-less `--gpu`
+            // and the fallback test), so it must not leak the instance.
+            let mut guard = VkGuard {
+                device: None,
+                loader: debug_instance_loader,
+                messenger: debug_messenger,
+                instance: Some(instance.clone()),
+            };
+
             // Enumerate and rank devices: discrete > integrated > everything
             // else; all candidates must have a compute queue family.
             let physical_devices = instance
@@ -231,6 +285,9 @@ impl Context {
             let device = instance
                 .create_device(physical_device, &device_info, None)
                 .map_err(Error::Vulkan)?;
+            // BH10: from here the device is also guarded (its destruction
+            // implicitly frees the query/command pools created from it below).
+            guard.device = Some(device.clone());
             let queue = device.get_device_queue(queue_family_index, 0);
 
             // T9-lite: GPU timestamp period + a 2-query pool (start/end) reused
@@ -269,6 +326,9 @@ impl Context {
                 name_object(loader, physical_device, "dssim:physical_device");
             }
 
+            // BH10: success -- take the guarded handles back out (disarming the
+            // guard so its Drop is a no-op) and hand ownership to Context.
+            let (device, debug_instance_loader, debug_messenger, instance) = guard.disarm();
             Ok(Self {
                 entry,
                 instance,
@@ -341,6 +401,12 @@ impl Context {
     /// T9-lite: accumulated GPU-busy milliseconds over all timed submits since
     /// the last reset (wall time minus this is submit/fence/PCIe overhead).
     pub fn gpu_elapsed_ms(&self) -> f64 {
+        // BH28: a driver reporting timestampPeriod == 0 would make every
+        // GPU-busy number silently 0.00 ms -- the exact figure the T5/T6a
+        // refutation rests on. Return NaN so it reads as "unmeasurable", not 0.
+        if self.timestamp_period_ns == 0.0 {
+            return f64::NAN;
+        }
         let ns = self.perf_gpu_ns.load(std::sync::atomic::Ordering::Relaxed) as f64;
         ns * self.timestamp_period_ns as f64 * 1e-6
     }
@@ -387,6 +453,12 @@ impl Context {
             })();
             if let Err(e) = recorded {
                 self.device.destroy_fence(fence, None);
+                // BH1: `record`/`end` may have failed after `begin` succeeded,
+                // leaving the buffer in the RECORDING state. vkFreeCommandBuffers
+                // on a recording buffer is illegal (VUID-vkFreeCommandBuffers-
+                // pCommandBuffers-00048); reset first to abort the recording (the
+                // pool carries RESET_COMMAND_BUFFER, so per-buffer reset is legal).
+                let _ = self.device.reset_command_buffer(cb, vk::CommandBufferResetFlags::empty());
                 self.device.free_command_buffers(self.command_pool, std::slice::from_ref(&cb));
                 return Err(e);
             }
@@ -405,6 +477,14 @@ impl Context {
                     .map_err(Error::Vulkan)?;
                 Ok(())
             })();
+            // BH4: if the wait failed (device-lost is the realistic case on this
+            // host -- see P3), the fence may still be pending and the command
+            // buffer executing; destroying/freeing them then violates
+            // VUID-vkDestroyFence-fence-01120 and VUID-vkFreeCommandBuffers-
+            // pCommandBuffers-00047. Drain best-effort before the cleanup.
+            if result.is_err() {
+                let _ = self.device.device_wait_idle();
+            }
             // F2: release the fence + command buffer on EVERY path, including
             // a submit/wait error -- the previous `?` skipped this cleanup and
             // leaked both.
