@@ -263,3 +263,79 @@ orchestration overhead is gone and GPU time actually dominates.)
   no prior art to inherit there.
 - CI lavapipe timing for the new (unpushed) Phase H blobs: unknown until push
   (audit F24).
+
+---
+
+## 8. Track status after M10 sign-off (audited 2026-09-06, pass 4)
+
+Verified against code (not against checkpoint prose). Evidence column cites
+what was actually observed in the tree at `36868da`.
+
+| Track | Status | Evidence |
+|---|---|---|
+| T1 one submit / GPU-resident | **DONE** | single `dispatch_sequence` per create/compare (815eab8); exit-obs met: 320x200 GPU 3.6 ms ≤ 15 ms target |
+| T2 staging ring / arena | **PARTIAL, rest rejected-with-reason** | CPU-side collapse done (`write_mapped_f32_with`, `pack_f32` deleted, 1a25751); ring rejected after investigation (staging is CPU-written at record time — d128cbb); peak memory solved differently via F28 split-submit |
+| T3 descriptor pre-allocation | **NOT TRIED** | still allocate-per-pass + pool-reset-per-submit (`pipeline.rs` MAX_SETS_PER_POOL=128, comment says "This is NOT dynamic") |
+| T4 timeline semaphores / overlap | **NOT TRIED** | no `Timeline`/SemaphoreType anywhere; fence-per-submit remains — but only 1–2 submits survive per compare, so remaining headroom is ~0.1–0.2 ms, not the ~120-fence case T4 was written for |
+| T5 2D dispatch / workgroup tuning | **NOT TRIED** | all 7 shaders still `local_size_x = 64` 1D with per-invocation div/mod |
+| T6 fused blur (shared memory) | **NOT TRIED** | zero `shared` declarations in any shader |
+| T7 UMA zero-copy staging | **NOT TRIED** | no UMA/device-local-host-visible detection in `context.rs`/`transfer.rs` |
+| T8 batch mode | **NOT TRIED** | CLI compares pairs only; no resident-reference multi-mod path |
+| T9 measurement infra | **PARTIAL** | create/compare split + allocator peak counters (F28) done; NO VkQueryPool GPU timestamps, no RGP capture, no clock lock — ratios remain single-run ±15% |
+
+**Answer to "did we try everything": No — 6 of 9 tracks were never attempted.**
+M10's *contract* ("beats measured CPU baseline on chosen workloads") is met on
+both GPUs, so nothing more is REQUIRED; the question is whether the untried
+tracks are worth their risk. Re-prioritized against the CURRENT profile
+(create dominates at large sizes: 2x91 ms vs 32 ms compare at 2048²; fixed
+overhead dominates at 320x200):
+
+1. **T5 (now justified)** — GPU compute is the big-size bottleneck; pure
+   indexing change, zero FP-semantics risk, docs' own estimate 10–30% of GPU
+   time. Best value/risk left.
+2. **T7 (now justified)** — iGPU is a signed-off target; staging on UMA is
+   provably pure waste. Low risk, discrete path untouched.
+3. **T6 (still gated)** — biggest upside (3–5x traffic) but bitwise-map gate
+   stands; do only after T5 so fusion is measured against tuned baselines.
+   New sub-idea spotted this pass: `h5(img)` for mu and `h5_mul(img,img)` for
+   sq both read the same img plane — one fused kernel halves img read traffic
+   for a per-pixel-expression-identical output (parity-safe by construction,
+   unlike full H5+V5 fusion).
+4. **T3** — CPU-side win; matters at small sizes where record overhead is a
+   visible fraction of 3.6 ms. Medium value, low risk.
+5. **Barrier tightening (new, call it T10)** — `dispatch_sequence` is
+   deliberately over-barriered ("every buffer the pass touches becomes visible
+   to every later consumer", ~40 full barriers per create). S3 in this doc's
+   own evidence base says keep masks tight; never revisited after T1 landed.
+   Needs T9-style timestamps to prove the win.
+6. **Merge ref+mod creates into one submit (new, T11)** — two independent
+   `create_image` calls = 2 submits + 2 fences + 2 alloc waves; one combined
+   sequence halves the fixed cost at small sizes. API-shape change.
+7. **T4 — DEMOTE**: premise (120 fences) is gone; residual gain ~0.1 ms.
+8. **T8 — feature, not optimization**: only if a real batch workflow exists.
+
+### Research delta this pass (beyond S1–S12)
+
+- ARM `vulkan_best_practice_for_mobile_developers` (github, live): sample set
+  confirms descriptor_management / pipeline_barriers / wait_idle /
+  specialization_constants as the canonical overhead levers — maps onto our
+  T3/T10/T4; specialization constants (fixing `channels`/workgroup size at
+  pipeline creation) is a NEW idea not in T1–T9: our shaders re-read
+  width/height/stride from push constants per invocation; per-size pipelines
+  would let the driver fold them — costs pipeline-count explosion, only worth
+  it for a fixed set of common sizes.
+- linux-graphics-stack-book ch25 (fetched): TBDR mobile caveat — not our
+  target set (desktop AMD + llvmpipe), noted for completeness.
+- zeux fence article + docs.vulkan.org best-practices URLs: 404'd again this
+  session (same as §7's list) — not cited; claims already covered by S1/S2.
+- GitHub code search for subgroup/tiled blur references: noise-dominated
+  (Blender forks); no license-clean reference implementation located — T6
+  remains ideas-only per §7 licensing note.
+
+### Bottom line
+
+Not everything was tried — but what remains is now optional polish with
+honest value rankings above, and the two cheap-risk winners (T5, T7) plus the
+free fusion sub-idea (mu/sq shared-read) are the ones to do if a next
+performance phase is opened. If none is opened, the M10 sign-off stands as
+is; this table is the record of what was knowingly left on the table.
