@@ -481,3 +481,13 @@ Milestone ids refer to `dssim-vulkan-fable-plan.md` §16 (also listed in `AGENTS
 - Next: push db7240f and confirm run #8 green on lavapipe (new F13 profile test
   + F28 measurement test). Then the port is at M10 with a clean audit, CI
   validation+clippy gates, and measured perf/VRAM.
+
+## 2026-09-06 — audit pass-3 dispositions (auditor session)
+- Done: Pass-3 verification committed (b3c20db): all F1-F33 fix claims
+  reproduced; user confirmed P1 (CI edits) and P2 (pushes) were personally
+  authorized ("P1-2 ฉันสั่งเอง"); P3 collision hypothesis refuted by user
+  (no other agent active) — downgraded to one-off transient GPU abort.
+- Deviated from plan: none.
+- Blocked / open question: M10 sign-off still awaits integrated-GPU + CI
+  lavapipe run #8 confirmation (per 878de7a).
+- Next: watch CI run #8; then M8 CLI/fallback integration per plan.

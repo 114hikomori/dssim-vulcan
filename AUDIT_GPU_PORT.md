@@ -350,23 +350,27 @@ captured output is not evidence of absence — same trap the CI gate fell into.
 ### New findings (process, not code)
 
 **P1 (process) — CI config modified without a recorded authorization.**
+RESOLVED 2026-09-06: user confirmed in the auditing session ("P1-2 ฉันสั่งเอง"
+— "I ordered those myself"). No action needed beyond this record.
 AGENTS.md §8 prohibits touching CI config "absent explicit instruction
 otherwise". `37d9fd8`/`13b13cb` modify `.github/workflows/ci.yml`; the
 checkpoints justify it under M8 scope but record "Deviated from plan: none"
 and quote no user instruction for the CI change itself. If the human did
 authorize it in the implementing session, append that quote to the checkpoint;
 if not, this needs a look.
-**P2 (process) — five pushes to origin/main this day.** The `d128cbb`
-checkpoint quotes authorization ("push to check") that this auditor cannot
-verify from its own session. Flagging for the human: confirm those pushes were
-yours/authorized; if yes, add the quote to the relevant entries per §6.
+**P2 (process) — five pushes to origin/main this day.** RESOLVED 2026-09-06:
+user confirmed the pushes were authorized ("P1-2 ฉันสั่งเอง"). The `d128cbb`
+"push to check" quote is genuine. No action needed.
 
-**P3 (resource safety) — concurrent GPU test runs collide.** First full
-`cargo test --workspace` of this pass aborted mid-way (exit ≠0, no FAILED line,
-last suites never ran) while the implementing agent's session was active;
-identical command immediately after: green. GPU suites are not safe to run
-concurrently (AGENTS.md §7) — serialize heavy runs; consider a machine-wide
-lock file in the test harness if both agents keep working in parallel.
+**P3 (resource safety) — one-off workspace-test abort, cause unknown.** First
+full `cargo test --workspace` of this pass aborted mid-way (exit ≠0, no FAILED
+line, smoke/ssim_parity never ran); the identical command immediately after was
+green, and each missing suite passed standalone. My initial "concurrent GPU
+collision" hypothesis is REFUTED — the user confirms no other agent is running
+in this repo. So this was a transient, not contention: most likely a driver
+TDR / device-lost / power-state blip on the laptop GPU during those two suites.
+Left as an open observation, not a defect: if it recurs, capture
+`driver reset`/`VK_ERROR_DEVICE_LOST` in the harness; no lock file needed.
 
 **P4 (nit) — small-image ratio drift.** 320x200 measured 0.63 here vs 0.50
 reported; still <1.0 so the "wins at all sizes" conclusion holds, but the
@@ -376,7 +380,8 @@ small-size margin is the noisiest and should be quoted as a range, not a point.
 
 **VERIFIED.** "ALL findings F1–F33 addressed" reproduces on every
 observationally checkable claim, with no weakened checks, no deleted tests,
-and one honest correction of this audit's own faulty inference. Remaining
-items are process (P1/P2 — human confirmation) and the pre-existing open
-question from `c4ee8d4`: M10 sign-off on the integrated GPU + CI lavapipe leg
-with the optimized path (CI run #8 pending per `878de7a`).
+and one honest correction of this audit's own faulty inference. P1/P2
+confirmed authorized by the user; P3 downgraded to a one-off transient
+(collision hypothesis refuted). Remaining: the pre-existing open question
+from `c4ee8d4` — M10 sign-off on the integrated GPU + CI lavapipe leg with
+the optimized path (CI run #8 pending per `878de7a`).
