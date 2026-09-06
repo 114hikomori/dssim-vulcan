@@ -50,6 +50,12 @@ pub struct Context {
     /// (its Drop frees remaining memory blocks), hence `Option` + explicit
     /// teardown order in `Drop`.
     pub(crate) allocator: Mutex<Option<Allocator>>,
+    /// Running total of bytes in live `Buffer` allocations, and the high-water
+    /// mark since the last reset. A deterministic proxy for peak device/host
+    /// VRAM footprint (counts our own allocations, not other processes) -- used
+    /// to measure the F28 submit-granularity effect rather than infer it.
+    pub(crate) live_bytes: std::sync::atomic::AtomicUsize,
+    pub(crate) peak_bytes: std::sync::atomic::AtomicUsize,
     /// Must be the LAST field: dropping `Entry` unloads the Vulkan library,
     /// and every other field's teardown calls into it first.
     #[allow(dead_code)] // read implicitly: must outlive all other fields' Drop
@@ -232,6 +238,8 @@ impl Context {
                 queue,
                 command_pool,
                 allocator: Mutex::new(Some(allocator)),
+                live_bytes: std::sync::atomic::AtomicUsize::new(0),
+                peak_bytes: std::sync::atomic::AtomicUsize::new(0),
             })
         }
     }
@@ -242,6 +250,23 @@ impl Context {
 
     pub fn device_type(&self) -> vk::PhysicalDeviceType {
         self.device_type
+    }
+
+    /// Bytes currently in live `Buffer` allocations (F28 measurement).
+    pub fn live_alloc_bytes(&self) -> usize {
+        self.live_bytes.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// High-water mark of live allocation bytes since the last reset (F28).
+    pub fn peak_alloc_bytes(&self) -> usize {
+        self.peak_bytes.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Reset the peak high-water mark to the current live total, so the next
+    /// measurement window starts from the existing baseline (pipelines, etc.).
+    pub fn reset_alloc_peak(&self) {
+        let live = self.live_bytes.load(std::sync::atomic::Ordering::Relaxed);
+        self.peak_bytes.store(live, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Name any Vulkan object for debugging tools, when the instance supports

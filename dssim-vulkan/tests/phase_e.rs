@@ -44,6 +44,21 @@ fn synth_gray(width: usize, height: usize, seed: u64) -> ImgVec<f32> {
     Img::new(buf, width, height)
 }
 
+/// Synthetic RGBAPLU pair (distinct) for the RGB create path.
+fn synth_rgba(width: usize, height: usize, seed: u64) -> ImgVec<dssim_core::RGBAPLU> {
+    let mut s = seed;
+    let mut next = || {
+        s ^= s << 13;
+        s ^= s >> 7;
+        s ^= s << 17;
+        (s & 0xFF) as f32 / 255.0
+    };
+    let buf = (0..width * height)
+        .map(|_| dssim_core::RGBAPLU::new(next(), next(), next(), 1.0))
+        .collect();
+    Img::new(buf, width, height)
+}
+
 fn all_devices() -> Vec<(usize, Arc<Context>)> {
     let _ = env_logger::try_init();
     let probe = Context::new().expect("Vulkan context");
@@ -224,5 +239,50 @@ fn phase_e_cpu_reference_parity() {
         let m = gpu.create_image_gray(&g2).unwrap();
         assert_parity("gray(1ch)", gpu.compare(&r, &m).unwrap(), cpu_score(&g1, &g2));
         let _ = dev_idx;
+    }
+}
+
+
+/// F28: MEASURE (not just infer) that the adaptive split-submit path lowers
+/// peak allocation bytes vs the batched path, via the Context allocator
+/// live/peak counters. Forces each mode with the test seam on a 512^2 image
+/// (large enough that the pyramid-transient excess is material, small enough to
+/// stay fast on lavapipe CI).
+#[test]
+fn phase_e_split_submit_lowers_peak_vram() {
+    let _gpu = gpu_lock();
+    let src = synth_rgba(512, 512, 0xF28F_28F2_8F28_F28F);
+
+    for (dev_idx, context) in all_devices() {
+        let mut gpu = GpuSsim::new(context.clone()).unwrap();
+
+        // Batched: threshold above the image => one submit, every scale's
+        // transients live simultaneously.
+        gpu.set_split_threshold_for_test(usize::MAX);
+        context.reset_alloc_peak();
+        let batched = gpu.create_image(&src).unwrap();
+        let peak_batched = context.peak_alloc_bytes();
+        drop(batched);
+
+        // Split: threshold 0 => flush per scale, only one scale's transients
+        // live at a time (persistent outputs still accumulate).
+        gpu.set_split_threshold_for_test(0);
+        context.reset_alloc_peak();
+        let split = gpu.create_image(&src).unwrap();
+        let peak_split = context.peak_alloc_bytes();
+        drop(split);
+
+        let saved = peak_batched.saturating_sub(peak_split);
+        eprintln!(
+            "device {dev_idx}: peak batched={peak_batched} B, split={peak_split} B, saved={saved} B"
+        );
+        assert!(
+            peak_split < peak_batched,
+            "device {dev_idx}: split peak ({peak_split}) should be below batched peak ({peak_batched})"
+        );
+        assert!(
+            saved > 1_000_000,
+            "device {dev_idx}: expected >1 MB saved, got {saved} B"
+        );
     }
 }

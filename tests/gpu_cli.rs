@@ -130,6 +130,44 @@ fn gpu_cli_matches_cpu() {
 }
 
 #[test]
+fn gpu_cli_applies_icc_profile_identically_to_cpu() {
+    // F13 demonstration: `profile.png` carries an embedded iCCP profile and
+    // `profile-stripped.png` has the same color baked into its (differing) raw
+    // pixels with the profile removed. `load_image::load_path` -- which BOTH
+    // the CPU and GPU decode paths call -- applies the profile, so the pair
+    // converges to dssim ~0. That convergence only happens if the profile is
+    // actually applied (raw profile.png pixels differ from stripped), so
+    // asserting BOTH paths give ~0 proves the GPU path handles ICC identically
+    // to CPU -- the corrected F13 claim, now demonstrated not just asserted.
+    let _serial = gpu_lock();
+    let pair = ["tests/profile.png", "tests/profile-stripped.png"];
+
+    let cpu = run_cli(&pair);
+    assert!(cpu.success, "CPU run failed:\n{}", cpu.stderr);
+    let gpu = run_cli(&["--gpu", "tests/profile.png", "tests/profile-stripped.png"]);
+    assert!(gpu.success, "GPU run failed:\n{}", gpu.stderr);
+
+    let used_gpu = gpu.stderr.contains("dssim: gpu device:");
+    if !used_gpu {
+        if vulkan_available() {
+            panic!("--gpu fell back to CPU on profiled input despite Vulkan being available:\n{}", gpu.stderr);
+        }
+        eprintln!("SKIPPED: no Vulkan device; profile parity is CPU-only here.");
+        return;
+    }
+
+    let cpu_score = parse_scores(&cpu.stdout)[0].1;
+    let gpu_score = parse_scores(&gpu.stdout)[0].1;
+    // ~0 on both => profile applied on both (raw pixels differ, so this is not
+    // a trivial identity). A path that skipped the profile would score >0.
+    assert!(cpu_score < 1e-4, "CPU did not converge profile vs stripped ({cpu_score}) -- profile not applied?");
+    assert!(gpu_score < 1e-4, "GPU did not converge profile vs stripped ({gpu_score}) -- GPU ICC handling diverges!");
+    let diff = (cpu_score - gpu_score).abs();
+    eprintln!("profile parity: cpu={cpu_score:.8} gpu={gpu_score:.8} diff={diff:.3e}");
+    assert!(diff <= TOL, "GPU/CPU profile parity: {cpu_score} vs {gpu_score} ({diff:.3e})");
+}
+
+#[test]
 fn gpu_cli_size_mismatch_matches_cpu_error() {
     let _serial = gpu_lock();
     // Different-size inputs: both paths must fail (the error text goes to

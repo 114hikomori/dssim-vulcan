@@ -47,6 +47,10 @@ impl Drop for BufferInner {
     fn drop(&mut self) {
         unsafe {
             if let Some(allocation) = self.allocation.take() {
+                // F28 measurement: this Buffer's bytes leave the live set.
+                self.context
+                    .live_bytes
+                    .fetch_sub(self.size as usize, std::sync::atomic::Ordering::Relaxed);
                 let mut allocator = self.context.allocator.lock().expect("allocator mutex poisoned");
                 let _ = allocator
                     .as_mut()
@@ -102,6 +106,14 @@ impl Context {
             self.device
                 .bind_buffer_memory(buffer, allocation.memory(), allocation.offset())
                 .map_err(Error::Vulkan)?;
+
+            // F28 measurement: track live + peak allocation bytes (a
+            // deterministic proxy for VRAM footprint).
+            let live = self
+                .live_bytes
+                .fetch_add(size as usize, std::sync::atomic::Ordering::Relaxed)
+                + size as usize;
+            self.peak_bytes.fetch_max(live, std::sync::atomic::Ordering::Relaxed);
 
             self.name_object(buffer, name);
             Ok(Buffer {
