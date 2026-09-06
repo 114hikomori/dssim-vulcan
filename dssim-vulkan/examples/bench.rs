@@ -121,17 +121,16 @@ fn main() {
             iters,
         );
 
-        // GPU path, same shape.
+        // GPU path, same shape. T11: create_image_pair builds both pyramids in
+        // one submit (one fence instead of two), then compare.
         let gpu = GpuSsim::new(context.clone()).unwrap();
         let gpu_score = {
-            let r = gpu.create_image(&a).unwrap();
-            let m = gpu.create_image(&b).unwrap();
+            let (r, m) = gpu.create_image_pair(&a, &b).unwrap();
             gpu.compare(&r, &m).unwrap()
         };
         let gpu_ms = time_ms(
             || {
-                let r = gpu.create_image(&a).unwrap();
-                let m = gpu.create_image(&b).unwrap();
+                let (r, m) = gpu.create_image_pair(&a, &b).unwrap();
                 let _ = gpu.compare(&r, &m).unwrap();
             },
             2,

@@ -99,14 +99,49 @@ impl GpuSsim {
     /// scales. Scale-count semantics replicate dssim-core exactly: one scale
     /// per weight, stopping when `Downsample` returns None (w<8 || h<8).
     pub fn create_image(&self, src: &ImgVec<dssim_core::RGBAPLU>) -> Result<GpuSsimImage> {
-        let mut current: Option<ImgVec<dssim_core::RGBAPLU>> = Some(src.clone());
-
         let mut passes: Vec<Pass> = Vec::new();
-        // F28: batch all scales in one submit for small/medium images; flush
-        // per scale at/above the threshold so large-image transients don't all
-        // pile up. See `SPLIT_SUBMIT_MIN_PIXELS` for the rationale.
         let flush_per_scale = src.width() * src.height() >= self.split_min_pixels;
+        let keep = self.push_rgb_scales(src, &mut passes, flush_per_scale)?;
+        if !passes.is_empty() {
+            dispatch_sequence(&self.context, &passes)?;
+        }
+        Ok(to_image(keep))
+    }
 
+    /// T11: build both pyramids in ONE submit. Reference and modified are
+    /// independent, so in batch mode their passes accumulate into a single
+    /// `dispatch_sequence` -- one submit + one fence instead of two, halving the
+    /// create-side fixed cost that dominates small/medium images. Large images
+    /// still flush per scale (memory-bounded), so the merge only applies where
+    /// it helps. The CLI's 1-vs-N streaming (original reused across modifieds)
+    /// can't use this; it serves single-pair callers and the bench.
+    pub fn create_image_pair(
+        &self,
+        reference: &ImgVec<dssim_core::RGBAPLU>,
+        modified: &ImgVec<dssim_core::RGBAPLU>,
+    ) -> Result<(GpuSsimImage, GpuSsimImage)> {
+        let mut passes: Vec<Pass> = Vec::new();
+        let flush_per_scale =
+            reference.width() * reference.height() >= self.split_min_pixels;
+        let keep_a = self.push_rgb_scales(reference, &mut passes, flush_per_scale)?;
+        let keep_b = self.push_rgb_scales(modified, &mut passes, flush_per_scale)?;
+        if !passes.is_empty() {
+            dispatch_sequence(&self.context, &passes)?;
+        }
+        Ok((to_image(keep_a), to_image(keep_b)))
+    }
+
+    /// Push one RGB image's whole pyramid into a shared `passes` buffer (so a
+    /// pair can be built in one submit). Returns the per-scale keepers. In split
+    /// mode it dispatches+clears after each scale to bound transient VRAM; in
+    /// batch mode it only accumulates.
+    fn push_rgb_scales<'p>(
+        &'p self,
+        src: &ImgVec<dssim_core::RGBAPLU>,
+        passes: &mut Vec<Pass<'p>>,
+        flush_per_scale: bool,
+    ) -> Result<Vec<ScaleKeep>> {
+        let mut current: Option<ImgVec<dssim_core::RGBAPLU>> = Some(src.clone());
         let mut keep: Vec<ScaleKeep> = Vec::new();
 
         for _ in 0..DEFAULT_WEIGHTS.len() {
@@ -164,17 +199,14 @@ impl GpuSsim {
 
             // img_all: Lab planes written straight in by the shader (plane 0 =
             // raw L, planes 1,2 = chroma, pre-blurred in place below); plane
-            // stride = width. There is deliberately no separate `lab` buffer
-            // and no lab->img copy: the old copy lacked TRANSFER_SRC/DST usage
-            // on both buffers (F25, a spec violation that only survived because
-            // validation was off). Writing plane 0 directly removes the copy.
+            // stride = width. No separate lab buffer / copy (F25).
             let img_all = self.context.alloc_buffer(
                 "s.img",
                 (pixels * 3 * 4) as u64,
                 vk::BufferUsageFlags::STORAGE_BUFFER,
                 gpu_allocator::MemoryLocation::GpuOnly,
             )?;
-            self.color.lab_into(&mut passes, rgba_buf.clone(), img_all.clone(), w, h, 3);
+            self.color.lab_into(passes, rgba_buf.clone(), img_all.clone(), w, h, 3);
             let tmp = self.context.alloc_buffer(
                 "s.tmp",
                 (pixels * 4) as u64,
@@ -183,14 +215,12 @@ impl GpuSsim {
             )?;
             for c in 1..3u32 {
                 let off = c * pixels as u32;
-                self.blur.h5_into(&mut passes, img_all.clone(), tmp.clone(), w, h, w, off, 0);
-                self.blur.v5_into(&mut passes, tmp.clone(), img_all.clone(), w, h, off);
+                self.blur.h5_into(passes, img_all.clone(), tmp.clone(), w, h, w, off, 0);
+                self.blur.v5_into(passes, tmp.clone(), img_all.clone(), w, h, off);
             }
 
-            // mu (blur of img) and sq (blur_mul(img, img)) per channel. Both
-            // stay device-local: `compare` reads them only on-device via the
-            // combine (F27 — mu was host-visible for no reason, wasting the
-            // scarce BAR-resident pool on dGPUs).
+            // mu (blur of img) and sq (blur_mul(img, img)) per channel, both
+            // device-local (compare reads them on-device; F27).
             let mu_all = self.context.alloc_buffer(
                 "s.mu",
                 (pixels * 3 * 4) as u64,
@@ -205,10 +235,10 @@ impl GpuSsim {
             )?;
             for c in 0..3u32 {
                 let off = c * pixels as u32;
-                self.blur.h5_into(&mut passes, img_all.clone(), tmp.clone(), w, h, w, off, 0);
-                self.blur.v5_into(&mut passes, tmp.clone(), mu_all.clone(), w, h, off);
-                self.blur.h5_mul_into(&mut passes, img_all.clone(), img_all.clone(), tmp.clone(), w, h, w, off, off, 0);
-                self.blur.v5_into(&mut passes, tmp.clone(), sq_all.clone(), w, h, off);
+                self.blur.h5_into(passes, img_all.clone(), tmp.clone(), w, h, w, off, 0);
+                self.blur.v5_into(passes, tmp.clone(), mu_all.clone(), w, h, off);
+                self.blur.h5_mul_into(passes, img_all.clone(), img_all.clone(), tmp.clone(), w, h, w, off, off, 0);
+                self.blur.v5_into(passes, tmp.clone(), sq_all.clone(), w, h, off);
             }
 
             keep.push(ScaleKeep {
@@ -220,32 +250,14 @@ impl GpuSsim {
                 sq: sq_all,
             });
             // F28: in split mode, submit this scale now and drop the pass
-            // records so its transients (staging/rgba/tmp) free immediately;
-            // the outputs survive via `keep`. In batch mode, keep accumulating.
+            // records so its transients free; outputs survive via `keep`.
             if flush_per_scale {
-                dispatch_sequence(&self.context, &passes)?;
+                dispatch_sequence(&self.context, passes)?;
                 passes.clear();
             }
             current = img.downsample();
         }
-
-        if !passes.is_empty() {
-            dispatch_sequence(&self.context, &passes)?;
-        }
-
-        Ok(GpuSsimImage {
-            scales: keep
-                .into_iter()
-                .map(|k| ScaleData {
-                    width: k.width,
-                    height: k.height,
-                    channels: k.channels,
-                    img: k.img,
-                    mu: k.mu,
-                    sq_blur: k.sq,
-                })
-                .collect(),
-        })
+        Ok(keep)
     }
 
     /// Gray (1-channel) variant: linear-light f32 planes, matching
@@ -519,4 +531,21 @@ struct ScaleKeep {
     img: Buffer,
     mu: Buffer,
     sq: Buffer,
+}
+
+/// Wrap a scale's keepers into the public per-image form.
+fn to_image(keep: Vec<ScaleKeep>) -> GpuSsimImage {
+    GpuSsimImage {
+        scales: keep
+            .into_iter()
+            .map(|k| ScaleData {
+                width: k.width,
+                height: k.height,
+                channels: k.channels,
+                img: k.img,
+                mu: k.mu,
+                sq_blur: k.sq,
+            })
+            .collect(),
+    }
 }

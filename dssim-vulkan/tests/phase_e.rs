@@ -286,3 +286,32 @@ fn phase_e_split_submit_lowers_peak_vram() {
         );
     }
 }
+
+
+/// T11: create_image_pair (both pyramids in one submit) must produce the exact
+/// same comparison result as two separate create_image calls -- the passes are
+/// identical, only grouped into one submit -- and match the CPU reference.
+#[test]
+fn phase_e_create_pair_matches_separate_and_cpu() {
+    let _gpu = gpu_lock();
+    let img1 = decode_rgba("../tests/test1-sm.png");
+    let img2 = decode_rgba("../tests/test2-sm.png");
+    let cpu = cpu_score(&img1, &img2);
+
+    for (dev_idx, context) in all_devices() {
+        let gpu = GpuSsim::new(context).unwrap();
+
+        let (r1, m1) = gpu.create_image_pair(&img1, &img2).unwrap();
+        let paired = gpu.compare(&r1, &m1).unwrap();
+
+        let r2 = gpu.create_image(&img1).unwrap();
+        let m2 = gpu.create_image(&img2).unwrap();
+        let separate = gpu.compare(&r2, &m2).unwrap();
+
+        assert_eq!(
+            paired, separate,
+            "device {dev_idx}: pair {paired} != separate {separate}"
+        );
+        assert_parity("pair-vs-cpu", paired, cpu);
+    }
+}
