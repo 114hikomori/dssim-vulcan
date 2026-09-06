@@ -1,6 +1,7 @@
 # Phase H Performance Experiments — Research & Plan
 
-Date: 2026-09-06. Companion to `AUDIT_M7_M9_PHASE_H.md`; feeds the "Phase H
+Date: 2026-09-06. Companion to `AUDIT_GPU_PORT.md` (renamed from
+`AUDIT_M7_M9_PHASE_H.md` in pass 2); feeds the "Phase H
 continuation — optimization" line in `CHECKPOINT.md`. Research-only document:
 no code changed here. Every technique below cites a source opened on
 2026-09-06 (S-numbers in §3); project-specific numbers cite our own code/HEAD.
@@ -276,6 +277,14 @@ orchestration overhead is gone and GPU time actually dominates.)
 ---
 
 ## 8. Track status after M10 sign-off (audited 2026-09-06, pass 4)
+
+> **SNAPSHOT NOTICE:** the table below is the pass-4 state (pinned `36868da`).
+> Round 2 has since superseded several rows: **T7 DONE** (`4bbe731`, corrected
+> `61bd7c8` — UMA zero-copy, A/B-measured on discrete too), **T11 DONE**
+> (`dd8a886` — merged ref+mod create submit), **T5/T6a REFUTED by T9-lite
+> measurement** (GPU-busy is ~5% of create wall), T9-lite landed (`8c40165`).
+> See the pass-4 addendum and F34 correction below, and `VULKAN_PERF.md`
+> "Round 2" for the measured numbers. Rows kept verbatim as the audit trail.
 
 Verified against code (not against checkpoint prose). Evidence column cites
 what was actually observed in the tree at `36868da`.
