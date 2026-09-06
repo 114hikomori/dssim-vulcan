@@ -224,7 +224,38 @@ pub(crate) fn buffer_barrier<'a>(
     }
 }
 
-/// Write `data` into a host-mapped allocation.
+/// Flush (host->device, after a write) or invalidate (device->host, before a
+/// read) a host-mapped allocation's range. F1: correctness must not depend on
+/// the allocation being HOST_COHERENT -- on coherent memory this is a no-op, so
+/// we skip the driver call; on non-coherent memory it is required or the GPU
+/// may read stale bytes / the host may read pre-invalidate garbage.
+fn sync_host_range(buffer: &Buffer, flush: bool) -> Result<()> {
+    let allocation = buffer.allocation.as_ref().expect("allocation present until drop");
+    if allocation
+        .memory_properties()
+        .intersects(vk::MemoryPropertyFlags::HOST_COHERENT)
+    {
+        return Ok(());
+    }
+    let range = vk::MappedMemoryRange {
+        memory: unsafe { allocation.memory() },
+        offset: allocation.offset(),
+        size: allocation.size(),
+        ..Default::default()
+    };
+    let device = &buffer.context.device;
+    unsafe {
+        if flush {
+            device.flush_mapped_memory_ranges(&[range])
+        } else {
+            device.invalidate_mapped_memory_ranges(&[range])
+        }
+    }
+    .map_err(Error::Vulkan)?;
+    Ok(())
+}
+
+/// Write `data` into a host-mapped allocation, then flush (F1).
 pub(crate) fn write_mapped(buffer: &Buffer, data: &[u8]) -> Result<()> {
     let allocation = buffer.allocation.as_ref().expect("allocation present until drop");
     let ptr = allocation
@@ -236,11 +267,28 @@ pub(crate) fn write_mapped(buffer: &Buffer, data: &[u8]) -> Result<()> {
     unsafe {
         std::ptr::copy_nonoverlapping(data.as_ptr(), ptr.as_ptr().cast::<u8>(), data.len());
     }
-    Ok(())
+    sync_host_range(buffer, true)
 }
 
-/// Read `len` bytes from a host-mapped allocation.
+/// Fill a host-mapped staging buffer's first `count` f32 slots directly via
+/// `f`, avoiding an intermediate `Vec<f32>`/`Vec<u8>` and a second memcpy
+/// (the small-image `create_image` upload was dominated by exactly those).
+/// Flushes afterwards (F1).
+pub(crate) fn write_mapped_f32_with<F: FnOnce(&mut [f32])>(buffer: &Buffer, count: usize, f: F) -> Result<()> {
+    let allocation = buffer.allocation.as_ref().expect("allocation present until drop");
+    let ptr = allocation
+        .mapped_ptr()
+        .ok_or_else(|| Error::Allocator(gpu_allocator::AllocationError::FailedToMap("allocation not host-mapped".into())))?;
+    debug_assert!((count * 4) as u64 <= buffer.size, "staging f32 write exceeds buffer size");
+    // SAFETY: allocation is host-visible, mapped, and at least `count*4` bytes.
+    let slice = unsafe { std::slice::from_raw_parts_mut(ptr.as_ptr().cast::<f32>(), count) };
+    f(slice);
+    sync_host_range(buffer, true)
+}
+
+/// Read `len` bytes from a host-mapped allocation, invalidating first (F1).
 pub(crate) fn read_bytes(buffer: &Buffer, len: usize) -> Result<Vec<u8>> {
+    sync_host_range(buffer, false)?;
     let allocation = buffer.allocation.as_ref().expect("allocation present until drop");
     let ptr = allocation
         .mapped_ptr()

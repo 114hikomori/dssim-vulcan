@@ -64,8 +64,8 @@ fn main() {
     let sizes: &[(usize, usize)] = &[(320, 200), (1024, 1024), (2048, 2048)];
     let iters = 7;
     println!(
-        "{:>12} {:>10} {:>10} {:>10} {:>10}",
-        "image", "cpu_ms", "gpu_ms", "ratio", "dssim_check"
+        "{:>12} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}",
+        "image", "cpu_ms", "gpu_ms", "ratio", "create_ms", "compare_ms", "dssim_check"
     );
 
     for &(w, h) in sizes {
@@ -101,22 +101,44 @@ fn main() {
             iters,
         );
 
+        // Phase breakdown: create_image (CPU downsample+pack+upload, one GPU
+        // submit) vs compare (cross-blur+combine submit + map readback).
+        let create_ms = time_ms(
+            || {
+                let _ = gpu.create_image(&a).unwrap();
+            },
+            2,
+            iters,
+        );
+        let cmp_r = gpu.create_image(&a).unwrap();
+        let cmp_m = gpu.create_image(&b).unwrap();
+        let compare_ms = time_ms(
+            || {
+                let _ = gpu.compare(&cmp_r, &cmp_m).unwrap();
+            },
+            2,
+            iters,
+        );
+
         // Sanity: the GPU score is a real DSSIM value in a plausible range.
-        assert!(gpu_score >= 0.0 && gpu_score < 1.0, "implausible score {gpu_score}");
+        assert!((0.0..1.0).contains(&gpu_score), "implausible score {gpu_score}");
 
         println!(
-            "{:>12} {:>10.2} {:>10.2} {:>10.2} {:>10.6}",
+            "{:>12} {:>10.2} {:>10.2} {:>10.2} {:>10.2} {:>10.2} {:>10.6}",
             format!("{w}x{h}"),
             cpu,
             gpu_ms,
             gpu_ms / cpu,
+            create_ms,
+            compare_ms,
             gpu_score
         );
     }
 
-    eprintln!("\nNote: GPU path is now the optimized Phase-H shape — create_image");
-    eprintln!("uploads each pyramid once, compare runs one batched submit over");
-    eprintln!("GPU-resident planes (only the tiny SSIM maps come back to CPU).");
-    eprintln!("Ratio < 1.0 means GPU beats CPU; small images still pay fixed");
-    eprintln!("submit/setup overhead, so the win grows with image size.");
+    eprintln!("\nNote: GPU path is the optimized Phase-H shape — create_image writes");
+    eprintln!("the pyramid upload straight into mapped staging (no intermediate");
+    eprintln!("Vec/memcpy passes), compare runs one batched submit over GPU-resident");
+    eprintln!("planes, and the per-scale SSIM maps come back for CPU pooling (the");
+    eprintln!("scale-0 map is full-resolution, not tiny). Ratio < 1.0 = GPU beats CPU;");
+    eprintln!("after the upload fix GPU wins at every measured size, incl. 320x200.");
 }

@@ -88,21 +88,26 @@ impl GpuSsim {
             let (w, h) = (img.width(), img.height());
             let pixels = w * h;
 
-            // Staging: interleaved RGBA (CPU-owned data, one copy to device).
-            let mut inter = Vec::with_capacity(pixels * 4);
-            for px in img.pixels() {
-                inter.extend_from_slice(&[px.r, px.g, px.b, px.a]);
-            }
+            // Staging: interleaved RGBA written straight into mapped host
+            // memory -- no intermediate Vec<f32>/Vec<u8>, no second memcpy
+            // (this upload dominated small-image create_image cost).
             let staging = self.context.alloc_buffer(
                 "s.staging",
-                (inter.len() * 4) as u64,
+                (pixels * 4 * 4) as u64,
                 vk::BufferUsageFlags::TRANSFER_SRC,
                 gpu_allocator::MemoryLocation::CpuToGpu,
             )?;
-            crate::transfer::write_mapped(&staging, &pack_f32(&inter))?;
+            crate::transfer::write_mapped_f32_with(&staging, pixels * 4, |dst| {
+                for (px, chunk) in img.pixels().zip(dst.as_chunks_mut::<4>().0) {
+                    chunk[0] = px.r;
+                    chunk[1] = px.g;
+                    chunk[2] = px.b;
+                    chunk[3] = px.a;
+                }
+            })?;
             let rgba_buf = self.context.alloc_buffer(
                 "s.rgba",
-                (inter.len() * 4) as u64,
+                (pixels * 4 * 4) as u64,
                 vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::STORAGE_BUFFER,
                 gpu_allocator::MemoryLocation::GpuOnly,
             )?;
@@ -170,7 +175,6 @@ impl GpuSsim {
 
         dispatch_sequence(&self.context, &passes)?;
 
-
         Ok(GpuSsimImage {
             scales: keep
                 .into_iter()
@@ -202,14 +206,17 @@ impl GpuSsim {
             let (w, h) = (img.width(), img.height());
             let pixels = w * h;
 
-            let input: Vec<f32> = img.pixels().collect();
             let staging = self.context.alloc_buffer(
                 "g.staging",
-                (input.len() * 4) as u64,
+                (pixels * 4) as u64,
                 vk::BufferUsageFlags::TRANSFER_SRC,
                 gpu_allocator::MemoryLocation::CpuToGpu,
             )?;
-            crate::transfer::write_mapped(&staging, &pack_f32(&input))?;
+            crate::transfer::write_mapped_f32_with(&staging, pixels, |dst| {
+                for (px, d) in img.pixels().zip(dst.iter_mut()) {
+                    *d = px;
+                }
+            })?;
             let gray_buf = self.context.alloc_buffer(
                 "g.gray",
                 (pixels * 4) as u64,
@@ -371,10 +378,6 @@ impl GpuSsim {
 
         Ok(to_dssim(ssim_sum / weight_sum))
     }
-}
-
-fn pack_f32(data: &[f32]) -> Vec<u8> {
-    data.iter().flat_map(|v| v.to_le_bytes()).collect()
 }
 
 /// One pyramid scale of statistics for one image. All buffers hold
