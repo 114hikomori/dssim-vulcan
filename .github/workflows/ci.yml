@@ -50,3 +50,24 @@ jobs:
           fi
           echo "validation layer state:"
           grep -m1 "validation layer:" test.log || echo "  (no validation-layer line found -- layer may be absent)"
+
+      # BH6: llvmpipe is a unified device, so the default run above only ever
+      # exercises the zero-copy upload branch; the staging CopyBuffer branch
+      # (score.rs) had ZERO CI coverage. Re-run the GPU crate's tests with
+      # DSSIM_UNIFIED=0 to force staging, and assert the override actually
+      # engaged (the "upload path: staging" line) -- otherwise this leg would
+      # pass vacuously if the env var were ever ignored.
+      - name: Test staging upload path (DSSIM_UNIFIED=0)
+        run: |
+          set -o pipefail
+          DSSIM_UNIFIED=0 cargo test -p dssim-vulkan -- --nocapture 2>&1 | tee staging.log
+          if grep -qE "\[vulkan ERROR\]|VUID-" staging.log; then
+            echo "::error::Vulkan validation errors on the staging upload path:"
+            grep -E "\[vulkan ERROR\]|VUID-" staging.log | head -40
+            exit 1
+          fi
+          if ! grep -q "upload path: staging" staging.log; then
+            echo "::error::DSSIM_UNIFIED=0 did not engage the staging path (override ignored?)"
+            exit 1
+          fi
+          echo "staging upload path exercised and validation-clean"

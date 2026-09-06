@@ -277,14 +277,38 @@ impl Context {
                     vk::MemoryPropertyFlags::DEVICE_LOCAL | vk::MemoryPropertyFlags::HOST_VISIBLE,
                 )
             });
-            // Measurement/debug override so staging-vs-zero-copy can be A/B'd on
-            // one device (DSSIM_UNIFIED=0 forces the staging path, =1 forces
-            // zero-copy). Unset => the detection above.
-            let is_unified_memory = match std::env::var("DSSIM_UNIFIED").as_deref() {
-                Ok("0") => false,
-                Ok("1") => true,
-                _ => is_unified_memory,
-            };
+            // BH6: measurement/debug override so staging-vs-zero-copy can be
+            // A/B'd on one device (DSSIM_UNIFIED=0 forces staging, =1 forces
+            // zero-copy). Unrecognized values WARN instead of silently falling
+            // through to detection -- the F26 lesson: an invisible override
+            // quietly retargets every "GPU verified" claim.
+            let (is_unified_memory, override_note) =
+                match std::env::var("DSSIM_UNIFIED").as_deref() {
+                    Ok("0") => (false, Some("0")),
+                    Ok("1") => (true, Some("1")),
+                    Ok(other) => {
+                        eprintln!(
+                            "[dssim-vulkan] DSSIM_UNIFIED={other:?} unrecognized (use 0 or 1); \
+                             using detected path"
+                        );
+                        (is_unified_memory, None)
+                    }
+                    Err(_) => (is_unified_memory, None),
+                };
+            // BH6: make the effective upload path explicit (like F26 did for
+            // validation). Always print when an override is active; in debug
+            // builds print the detected path too, so CI logs show which branch
+            // (zero-copy vs staging CopyBuffer) the parity suites exercised.
+            if cfg!(debug_assertions) || override_note.is_some() {
+                eprintln!(
+                    "[dssim-vulkan] upload path: {}{}",
+                    if is_unified_memory { "zero-copy" } else { "staging" },
+                    match override_note {
+                        Some(o) => format!(" (DSSIM_UNIFIED={o} override)"),
+                        None => String::new(),
+                    }
+                );
+            }
 
             let queue_priorities = [1.0];
             let queue_info = vk::DeviceQueueCreateInfo::default()
