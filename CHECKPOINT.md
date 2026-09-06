@@ -528,3 +528,43 @@ Milestone ids refer to `dssim-vulkan-fable-plan.md` §16 (also listed in `AGENTS
 - Next: none required for M10. Deferred-by-design (need profiling justification
   per AGENTS.md §8): sub-scale 4K chunking below ~72 B/px, GPU-side pooling,
   GPU image decode. Optional: tag a release (needs explicit user instruction).
+
+## 2026-09-06 — M8 SIGNED OFF (retroactive; work done in Phase G, declaration was missing)
+- Exit-observation (plan §9 M8: "CLI + CI + fallback integrated") — now all
+  observed, not just present:
+  * `--gpu` flag wired into the CLI (run_gpu), routes through GpuSsim. ✓
+  * CPU fallback: logic in run_gpu's Context::new() error path, AND now
+    exercised end-to-end by gpu_cli_falls_back_to_cpu_when_no_vulkan_device
+    (forces zero ICDs via VK_ICD_FILENAMES/VK_DRIVER_FILES; asserts fallback
+    note, no device line, exit 0, CPU-matching score). This was the audit
+    "C" gap — previously never run because every env has a device. ✓
+  * Output format: same `{dssim:.8}\t{file}` as CPU; gpu_cli asserts 8
+    fractional digits (F11-hardened) + ≤5e-6 parity + positive GPU signal (F7). ✓
+  * README documents the experimental backend + caveats (F20). ✓
+  * CI: workflow green on lavapipe (runs #4-8), now with validation + clippy
+    gates (F21). ✓
+- Deviated from plan: none. Note: M8 was functionally complete at Phase G
+  (commit 8608e8d/ab5cc2e) but had no "M8 met" checkpoint entry until now; the
+  fallback path in particular was unverified until this session's C fix.
+- Blocked / open question: none.
+- Next: (M9 sign-off follows.)
+
+## 2026-09-06 — M9 SIGNED OFF (profile completed + permanent record)
+- Exit-observation (plan §9 M9: "performance profile completed") — met:
+  * Baseline measured: pre-Phase-H per-scale path was 4.2-15.3x SLOWER than
+    CPU (overhead-bound), recorded at 1dabf06.
+  * Optimized path profiled on BOTH real GPUs + 4 sizes incl 4K: discrete
+    0.41-0.59x, integrated 0.46-0.57x (GPU beats CPU everywhere). create vs
+    compare breakdown captured; the upload-collapse hotspot identified by
+    measurement (temporary create-probe), not guessed.
+  * Permanent summary now in VULKAN_PERF.md (was only transient bench output
+    before — the audit "B" gap). Reproducible via
+    `cargo run -p dssim-vulkan --release --example bench`.
+- Honest caveats recorded in VULKAN_PERF.md: laptop CPU-time noise (±15%),
+  single-run ratios (direction stable, decimals not), 4K VRAM measured at 512^2
+  + extrapolated, 16-bit is 8-bit-approx.
+- Deviated from plan: none. M9 work predates this; the permanent-doc + explicit
+  sign-off were the missing pieces.
+- Blocked / open question: none.
+- Next: M0-M10 all now have explicit sign-off entries. Optional: push the
+  session's unpushed commits; tag a release only on explicit instruction.
