@@ -161,7 +161,12 @@ fn run_gpu(map_output_file: Option<&String>, files: &[String]) -> Result<(), Box
             return run_cpu_simple(files);
         }
     };
+    // Positive signal that the GPU path is actually running. The gpu_cli test
+    // asserts this line is present (not merely that the fallback note is
+    // absent) so the check cannot silently rot if the fallback wording changes.
+    let device_name = context.device_name().to_owned();
     let gpu = gpu_backend::GpuSsim::new(context)?;
+    eprintln!("dssim: gpu device: {device_name}");
     type GpuErr = Box<dyn std::error::Error + Send + Sync>;
 
     let (images_send, mut images_recv) = ordered_channel::bounded(2);
