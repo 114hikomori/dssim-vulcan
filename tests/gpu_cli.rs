@@ -309,3 +309,58 @@ fn gpu_cli_gray_pair_matches_cpu() {
     eprintln!("gray CLI: cpu={cs:.8} gpu={gs:.8} diff={diff:.3e}");
     assert!(diff <= TOL, "gray CLI parity: {cs} vs {gs} ({diff:.3e})");
 }
+
+
+/// BH17: the CLI never exercises split-submit mode -- every other fixture is
+/// *-sm.png, far under the 6M-px split threshold. This generates a 2500^2
+/// (6.25M px) pair that forces the adaptive split path at the CLI level
+/// (create_image flushes per scale, compare flushes per scale, streaming the
+/// original across the modified), which the small fixtures never reach.
+/// #[ignore]d: slow (multi-second create+compare on both paths) and memory-
+/// heavy. Run with `cargo test --test gpu_cli split_submit -- --ignored --nocapture`.
+#[test]
+#[ignore = "large-image CLI split-path test; run with --ignored"]
+fn gpu_cli_split_submit_large_image_matches_cpu() {
+    let _serial = gpu_lock();
+    if !vulkan_available() {
+        eprintln!("SKIPPED: no Vulkan device for large-image CLI check.");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("dssim-cli-split-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (w, h) = (2500usize, 2500usize);
+    let mk = |name: &str, seed: u32| {
+        let px: Vec<rgb::RGBA8> = (0..w * h)
+            .map(|i| {
+                let x = (i % w) as u32;
+                let y = (i / w) as u32;
+                rgb::RGBA8::new(
+                    ((x + seed) % 256) as u8,
+                    ((y * 3 + seed) % 256) as u8,
+                    ((x ^ y) % 256) as u8,
+                    255,
+                )
+            })
+            .collect();
+        let path = dir.join(name);
+        lodepng::encode32_file(&path, &px, w, h).unwrap();
+        path
+    };
+    let a = mk("a.png", 0);
+    let b = mk("b.png", 7);
+    let ap = a.to_str().unwrap();
+    let bp = b.to_str().unwrap();
+
+    let cpu = run_cli(&[ap, bp]);
+    assert!(cpu.success, "CPU large run failed:\n{}", cpu.stderr);
+    let gpu = run_cli(&["--gpu", ap, bp]);
+    assert!(gpu.success, "GPU large run failed:\n{}", gpu.stderr);
+    assert!(gpu.stderr.contains("dssim: gpu device:"), "GPU did not engage:\n{}", gpu.stderr);
+
+    let cs = parse_scores(&cpu.stdout)[0].1;
+    let gs = parse_scores(&gpu.stdout)[0].1;
+    let diff = (cs - gs).abs();
+    eprintln!("split CLI 2500^2: cpu={cs:.8} gpu={gs:.8} diff={diff:.3e}");
+    assert!(diff <= TOL, "CLI split-path parity: {cs} vs {gs} ({diff:.3e})");
+    std::fs::remove_dir_all(&dir).ok();
+}
