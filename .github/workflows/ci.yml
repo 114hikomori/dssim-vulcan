@@ -12,16 +12,39 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install lavapipe (software Vulkan)
+      - name: Install lavapipe (software Vulkan) + validation layers
         run: |
           sudo apt-get update
-          sudo apt-get install -y mesa-vulkan-drivers libvulkan1
+          sudo apt-get install -y mesa-vulkan-drivers libvulkan1 vulkan-validationlayers
 
       - name: Rust toolchain
-        run: rustup toolchain install stable --profile minimal
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup component add clippy --toolchain stable
+
+      # F21: lint our crates with -D warnings. --no-deps keeps the gate off the
+      # upstream dssim-core fork (which has pre-existing style warnings we do
+      # not own); benches are excluded because they need nightly (#![feature(test)]).
+      - name: Clippy (our crates, warnings are errors)
+        run: >
+          cargo clippy -p dssim-vulkan -p dssim --no-deps
+          --lib --bins --tests --examples -- -D warnings
 
       - name: Build
         run: cargo build --workspace
 
-      - name: Test (single run — GPU parity suites are deterministic, no stress loops)
-        run: cargo test --workspace
+      # F21: the debug build enables the Khronos validation layer when present
+      # (now installed above), and context.rs prints its state. Fail the job if
+      # any validation error surfaces -- previously "validation clean" was never
+      # actually tested in CI (the layer was absent).
+      - name: Test (validation-enabled; fail on any Vulkan validation error)
+        run: |
+          set -o pipefail
+          cargo test --workspace 2>&1 | tee test.log
+          if grep -qE "\[vulkan ERROR\]|VUID-" test.log; then
+            echo "::error::Vulkan validation errors detected in CI:"
+            grep -E "\[vulkan ERROR\]|VUID-" test.log | head -40
+            exit 1
+          fi
+          echo "validation layer state:"
+          grep -m1 "validation layer:" test.log || true

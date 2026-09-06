@@ -155,8 +155,8 @@ fn phase_e_small_and_odd_sizes() {
     }
 }
 
-/// F28: exercise the per-scale flush path (normally only reached at
-/// >= SPLIT_SUBMIT_MIN_PIXELS, far too slow for lavapipe CI) by forcing the
+/// F28: exercise the per-scale flush path (normally only reached at or above
+/// SPLIT_SUBMIT_MIN_PIXELS, far too slow for lavapipe CI) by forcing the
 /// threshold to 0 on small images, and prove split == batch == CPU for both
 /// the RGB and gray create paths plus compare. The passes are identical in
 /// both modes -- only submission boundaries differ -- so split and batch must
