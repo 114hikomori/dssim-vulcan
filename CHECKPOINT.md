@@ -414,3 +414,46 @@ Milestone ids refer to `dssim-vulkan-fable-plan.md` §16 (also listed in `AGENTS
 - Next: push F7+F28 to CI to confirm the new split test + gpu_cli hardening
   pass on lavapipe (needs user's go-ahead per AGENTS.md §5). Then optionally
   sweep the remaining low-severity Pass-1 doc/robustness findings.
+
+## 2026-09-06 — Audit Pass-1 sweep (F2/F6/F8/F13-F22)
+- Doc/claim accuracy (comment-only; .spv unchanged, still hash-match): F15/F16
+  (shader header byte-counts were swapped blur=56/combine=48, and stale
+  dssim.rs line cites -> corrected to 377-438 / 440-479 + field meanings to the
+  src_off/dst_off layout); F13 (load_image_rgba does NOT skip ICC -- same
+  load_path as CPU, profiles identical); F14 (run_gpu output is same *format*,
+  not byte-identical values); F18 (crate doc Phase B -> Phase H/M10); F17
+  (dumps.rs manifest hash is std DefaultHasher/SipHash, not FNV-1a; not stable
+  across Rust releases -> same-toolchain checks only); F20 (README GPU para now
+  states profiles match CPU + flags 16-bit->8-bit gap). (commit 717da60)
+- Code: F2 (submit_one_shot leaked fence+cmdbuf on queue_submit/wait error --
+  cleanup now on every path); F6 (Error::source() implemented for
+  Loader/Vulkan/Allocator so main.rs prints the real cause); F8 (gpu_cli
+  process-local GPU_LOCK serializes its two subprocess-spawning tests).
+- F21 (CI): installed vulkan-validationlayers so the debug build enables
+  validation in CI; test step now FAILS on any "[vulkan ERROR]"/"VUID-" line
+  (previously "validation clean" was never tested); added a clippy gate
+  `cargo clippy -p dssim-vulkan -p dssim --no-deps --lib --bins --tests
+  --examples -- -D warnings`. The gate immediately caught a real doc-lint
+  (a ">=" line read as a markdown blockquote) -- reworded. (commit 37d9fd8)
+- F19 CORRECTION (append-only; supersedes the M7 entry's wording): M7 claimed
+  "gray pair (synthetic + CLI gray1 fixtures via image_gray tests)". That is
+  wrong -- image_gray (src/main.rs) is a CPU-only unit test; NO GPU test loads
+  any gray1-*.png fixture. GPU gray coverage is SYNTHETIC ONLY
+  (create_image_gray in phase_e/lab tests). The CLI has no gray->GPU routing
+  (load_image_rgba feeds every image through the RGB create_image path), so a
+  real GPU-CLI-gray test isn't feasible without adding that path. Wording
+  corrected here rather than editing the M7 history.
+- F22: cargo fmt is VACUOUS repo-wide (.rustfmt.toml disable_all_formatting=true
+  is upstream Kornel policy, commit 73933cd, pre-port). We do NOT add a fmt CI
+  gate and STOP claiming "fmt clean" going forward. Clippy, by contrast, is now
+  genuinely gated in CI (F21), so "clippy clean" is a real, enforced property.
+- Verified: full workspace green WITH validation (0 vulkan errors, 15 suites);
+  clippy --no-deps -D warnings green for our crates; all .spv match fresh
+  recompile; ci.yml valid YAML.
+- Blocked / open question: the new CI validation gate is only proven on AMD
+  locally -- needs a lavapipe CI run to confirm it stays green there (push to
+  check). If lavapipe+validation surfaces a benign complaint, narrow the gate.
+- Next: push the sweep + CI change and watch run #6 (validation + clippy on
+  lavapipe). Remaining audit items after that: none from Pass 1/2 except the
+  conditional F28 byte-level VRAM measurement (deferred) and F13's optional
+  profile-bearing fixture demonstration.
