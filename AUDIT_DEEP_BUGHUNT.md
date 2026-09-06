@@ -388,3 +388,72 @@ comment-only).
 Deferred by design (audit's own ordering): BH31 full push-constant migration
 (refactor risk; drift already caught by parity), BH5 was fixed with a mutex
 rather than deferred since it's cheap and makes the Sync claim honest.
+
+---
+
+## Resolution verification (pass 8, 2026-09-07) — fixes `1ca1748..f490b23`
+
+Method: 3 read-only verifier sub-agents (one per fix group) + main-agent
+dynamic runs. Verdicts below are OUR re-verification, not the fixer's claims.
+
+**Dynamic (main agent):** workspace green exit 0 with counts matching every
+claimed addition (gpu_cli 4→8, phase_e 6→12, 1 ignored = BH17); clippy
+`-D warnings` clean; `.spv` files untouched in the range AND 7/7 still match
+fresh glslc recompile (comment-only shader edits confirmed); BH6's new log
+line observed live (`upload path: zero-copy` ×5 on the ReBAR discrete —
+consistent with F34); BH17's ignored 2500² CLI test run: `diff=1.400e-7`
+reproduced exactly.
+
+**CLOSED (28):** BH1 (reset-before-free + PoolReset Drop under submit-lock
+after fence-wait — ordering proven sound, no double-free), BH2 (limits
+queried + CLI pre-check `supports_size` + dispatch-time Err; fallback Cell
+checked BEFORE channel-error mapping — decoder "Aborted" can't mask it),
+BH3/BH18 (same-size Err before any alloc; threshold halved; seam respected),
+BH4, BH5 (submit_lock covers the full critical section; lock order
+submit→allocator proven one-way, no deadlock path exists; 4-thread test
+real), BH7 (would now catch {:.6} drift — adversarially traced), BH8,
+BH13 (both fallbacks write maps), BH14, BH15, BH16 (should_panic with
+message-matched expected, fires before any alloc), BH19, BH25 (no
+double-free — Allocation moved), BH26 (zero asserts left in record
+closures), BH27, BH28, BH29 (all four sites), BH30 (exactness triple-pinned
+per pipeline — no legitimate caller broken), BH31/BH32 (notes landed),
+BH33, BH34 (non-vacuous: exact f64 equality + CPU parity).
+
+**PARTIAL (4):**
+- **BH10** — `create_debug_utils_messenger` failure (`context.rs:216-218`)
+  still `?`s BEFORE the VkGuard exists (229): instance leaks on that one
+  narrow path. Fix shape: construct guard right after `create_instance`
+  with `messenger: None`.
+- **BH9** — docs corrected + decode-precision test added, but the audit's
+  prescribed 16-bit CPU-vs-GPU *parity* test (CLI or library) does not
+  exist; the gap that hid the stale claim is still open.
+- **BH17** — test passes and the 1.4e-7 diff reproduces, but nothing makes
+  split execution OBSERVABLE in-test (no log/counter): if the threshold
+  wiring regressed, it would silently pass in batch mode. The 1.4e-7 number
+  lives in an eprintln; the assert is ≤5e-6.
+- **BH35** — decode-error exit codes asserted both paths; message TEXT not
+  asserted (half the stated gap).
+
+**Honesty nits (wording, not mechanism):** CHECKPOINT says the concurrency
+test proves "all-byte-identical" — it asserts 5e-6 parity; BH31's commit
+message claims 1.16/255.0 notes landed — those comments predate it. BH1's
+guard intentionally swallows pool-reset errors on the success path
+(documented trade-off, slightly weaker reporting).
+
+**Test-weakening hunt over `bacc4a8..HEAD`: CLEAN** — every removed line
+accounted for, no tolerance constant moved, no new skips beyond the declared
+BH17 `#[ignore]`.
+
+**Open residuals:** BH6's CI staging leg has NEVER run (whole range
+unpushed — first push is its real test); llvmpipe's actual
+`maxComputeWorkGroupCount` still [C]; untracked `PHASE_H_CONSOLIDATED_PLAN.md`
++ `archive/phase-h-addons/` (research consolidation, commit-worthy-looking,
+human call); 11 commits ahead of origin awaiting a push decision.
+
+### Pass 8 verdict
+
+**VERIFIED WITH CAVEATS.** 28/32 actionable findings provably closed with no
+new bugs introduced (the two riskiest fixes — PoolReset ordering and BH30
+push-exactness — were the ones we dug at hardest; both hold); 4 PARTIALs are
+small, honestly-close-to-claimed, and listed above with fix shapes. The
+resolution table's claims match the code.
