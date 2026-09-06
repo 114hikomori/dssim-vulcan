@@ -56,6 +56,15 @@ pub struct Context {
     /// to measure the F28 submit-granularity effect rather than infer it.
     pub(crate) live_bytes: std::sync::atomic::AtomicUsize,
     pub(crate) peak_bytes: std::sync::atomic::AtomicUsize,
+    /// T9-lite: GPU timestamp query pool + tick period, for per-submit
+    /// GPU-busy timing that separates compute time from submit/fence/PCIe wall
+    /// overhead. `timing_enabled` gates the (otherwise zero-cost) bracketing in
+    /// `dispatch_sequence`; `perf_gpu_ns` accumulates elapsed GPU ns over the
+    /// submits since the last reset. Off by default -- tests never pay for it.
+    pub(crate) timestamp_period_ns: f32,
+    pub(crate) perf_query_pool: vk::QueryPool,
+    pub(crate) timing_enabled: std::sync::atomic::AtomicBool,
+    pub(crate) perf_gpu_ns: std::sync::atomic::AtomicU64,
     /// Must be the LAST field: dropping `Entry` unloads the Vulkan library,
     /// and every other field's teardown calls into it first.
     #[allow(dead_code)] // read implicitly: must outlive all other fields' Drop
@@ -199,6 +208,18 @@ impl Context {
                 .map_err(Error::Vulkan)?;
             let queue = device.get_device_queue(queue_family_index, 0);
 
+            // T9-lite: GPU timestamp period + a 2-query pool (start/end) reused
+            // per timed submit (reads are synchronous after the fence).
+            let timestamp_period_ns = props.limits.timestamp_period;
+            let perf_query_pool = device
+                .create_query_pool(
+                    &vk::QueryPoolCreateInfo::default()
+                        .query_type(vk::QueryType::TIMESTAMP)
+                        .query_count(2),
+                    None,
+                )
+                .map_err(Error::Vulkan)?;
+
             let command_pool = device
                 .create_command_pool(
                     &vk::CommandPoolCreateInfo::default()
@@ -240,6 +261,10 @@ impl Context {
                 allocator: Mutex::new(Some(allocator)),
                 live_bytes: std::sync::atomic::AtomicUsize::new(0),
                 peak_bytes: std::sync::atomic::AtomicUsize::new(0),
+                timestamp_period_ns,
+                perf_query_pool,
+                timing_enabled: std::sync::atomic::AtomicBool::new(false),
+                perf_gpu_ns: std::sync::atomic::AtomicU64::new(0),
             })
         }
     }
@@ -267,6 +292,24 @@ impl Context {
     pub fn reset_alloc_peak(&self) {
         let live = self.live_bytes.load(std::sync::atomic::Ordering::Relaxed);
         self.peak_bytes.store(live, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// T9-lite: turn per-submit GPU timestamp bracketing on/off (off by
+    /// default; tests never enable it, so the hot path stays untouched).
+    pub fn set_gpu_timing(&self, enabled: bool) {
+        self.timing_enabled.store(enabled, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// T9-lite: zero the accumulated GPU-busy time before a measured region.
+    pub fn reset_gpu_timing(&self) {
+        self.perf_gpu_ns.store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// T9-lite: accumulated GPU-busy milliseconds over all timed submits since
+    /// the last reset (wall time minus this is submit/fence/PCIe overhead).
+    pub fn gpu_elapsed_ms(&self) -> f64 {
+        let ns = self.perf_gpu_ns.load(std::sync::atomic::Ordering::Relaxed) as f64;
+        ns * self.timestamp_period_ns as f64 * 1e-6
     }
 
     /// Name any Vulkan object for debugging tools, when the instance supports
@@ -344,6 +387,7 @@ impl Drop for Context {
         unsafe {
             let _ = self.device.device_wait_idle();
             self.device.destroy_command_pool(self.command_pool, None);
+            self.device.destroy_query_pool(self.perf_query_pool, None);
             // Drop the allocator while the device is still valid: its Drop
             // frees any remaining memory blocks through vkFreeMemory.
             if let Ok(mut guard) = self.allocator.lock() {

@@ -238,9 +238,19 @@ pub enum Pass<'a> {
 pub fn dispatch_sequence(context: &Arc<Context>, passes: &[Pass<'_>]) -> Result<()> {
     struct ResetPool<'a>(&'a ComputePipeline);
     let mut used_pipelines: Vec<ResetPool<'_>> = Vec::new();
+    let timed = context.timing_enabled.load(std::sync::atomic::Ordering::Relaxed);
 
     context.submit_one_shot(|cb| unsafe {
         let device = &context.device;
+        if timed {
+            device.cmd_reset_query_pool(cb, context.perf_query_pool, 0, 2);
+            device.cmd_write_timestamp(
+                cb,
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                context.perf_query_pool,
+                0,
+            );
+        }
         for pass in passes {
             // Over-barriered on purpose (correctness first): every buffer the
             // pass touches becomes visible to every later consumer.
@@ -297,8 +307,37 @@ pub fn dispatch_sequence(context: &Arc<Context>, passes: &[Pass<'_>]) -> Result<
                 &[],
             );
         }
+        if timed {
+            device.cmd_write_timestamp(
+                cb,
+                vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                context.perf_query_pool,
+                1,
+            );
+        }
         Ok(())
     })?;
+
+    // T9-lite: the fence already waited inside submit_one_shot, so the two
+    // timestamps are ready. Accumulate the GPU-busy delta (ticks) for this
+    // submit; the bench converts to ms via Context::gpu_elapsed_ms.
+    if timed {
+        unsafe {
+            let mut ts = [0u64; 2];
+            context
+                .device
+                .get_query_pool_results(
+                    context.perf_query_pool,
+                    0,
+                    &mut ts,
+                    vk::QueryResultFlags::TYPE_64 | vk::QueryResultFlags::WAIT,
+                )
+                .map_err(Error::Vulkan)?;
+            context
+                .perf_gpu_ns
+                .fetch_add(ts[1].wrapping_sub(ts[0]), std::sync::atomic::Ordering::Relaxed);
+        }
+    }
 
     // Descriptor sets were consumed; recycle the pools.
     for ResetPool(pipeline) in &used_pipelines {

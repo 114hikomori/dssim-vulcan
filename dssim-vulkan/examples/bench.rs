@@ -51,6 +51,30 @@ fn time_ms<T, F: FnMut() -> T>(mut f: F, warmup: usize, iters: usize) -> f64 {
     start.elapsed().as_secs_f64() * 1000.0 / iters as f64
 }
 
+/// Like [`time_ms`] but also returns GPU-busy milliseconds (T9-lite VkQueryPool
+/// timestamps) averaged over the timed iterations. `wall - gpu_busy` is the
+/// submit/fence/PCIe overhead; the compute tracks (T5/T6a) move `gpu_busy`.
+fn time_ms_gpu<T, F: FnMut() -> T>(
+    ctx: &dssim_vulkan::Context,
+    mut f: F,
+    warmup: usize,
+    iters: usize,
+) -> (f64, f64) {
+    for _ in 0..warmup {
+        f();
+    }
+    ctx.set_gpu_timing(true);
+    ctx.reset_gpu_timing();
+    let start = Instant::now();
+    for _ in 0..iters {
+        f();
+    }
+    let wall = start.elapsed().as_secs_f64() * 1000.0 / iters as f64;
+    let gpu_busy = ctx.gpu_elapsed_ms() / iters as f64;
+    ctx.set_gpu_timing(false);
+    (wall, gpu_busy)
+}
+
 fn main() {
     let _ = env_logger::try_init();
     // DSSIM_BENCH_DEVICE=<candidate index> pins a specific GPU (e.g. the
@@ -74,8 +98,8 @@ fn main() {
 
     let sizes: &[(usize, usize)] = &[(320, 200), (1024, 1024), (2048, 2048), (4096, 4096)];
     println!(
-        "{:>12} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}",
-        "image", "cpu_ms", "gpu_ms", "ratio", "create_ms", "compare_ms", "dssim_check"
+        "{:>12} {:>9} {:>9} {:>7} {:>9} {:>9} {:>9} {:>9} {:>10}",
+        "image", "cpu_ms", "gpu_ms", "ratio", "create_ms", "create_gpu", "compare_ms", "compare_gpu", "dssim_check"
     );
 
     for &(w, h) in sizes {
@@ -115,8 +139,11 @@ fn main() {
         );
 
         // Phase breakdown: create_image (CPU downsample+pack+upload, one GPU
-        // submit) vs compare (cross-blur+combine submit + map readback).
-        let create_ms = time_ms(
+        // submit) vs compare (cross-blur+combine submit + map readback). The
+        // *_gpu columns are GPU-busy time (T9-lite timestamps); wall-minus-gpu
+        // is submit/fence/PCIe overhead.
+        let (create_ms, create_gpu) = time_ms_gpu(
+            &context,
             || {
                 let _ = gpu.create_image(&a).unwrap();
             },
@@ -125,7 +152,8 @@ fn main() {
         );
         let cmp_r = gpu.create_image(&a).unwrap();
         let cmp_m = gpu.create_image(&b).unwrap();
-        let compare_ms = time_ms(
+        let (compare_ms, compare_gpu) = time_ms_gpu(
+            &context,
             || {
                 let _ = gpu.compare(&cmp_r, &cmp_m).unwrap();
             },
@@ -137,13 +165,15 @@ fn main() {
         assert!((0.0..1.0).contains(&gpu_score), "implausible score {gpu_score}");
 
         println!(
-            "{:>12} {:>10.2} {:>10.2} {:>10.2} {:>10.2} {:>10.2} {:>10.6}",
+            "{:>12} {:>9.2} {:>9.2} {:>7.2} {:>9.2} {:>9.2} {:>9.2} {:>9.2} {:>10.6}",
             format!("{w}x{h}"),
             cpu,
             gpu_ms,
             gpu_ms / cpu,
             create_ms,
+            create_gpu,
             compare_ms,
+            compare_gpu,
             gpu_score
         );
     }

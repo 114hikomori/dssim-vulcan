@@ -65,3 +65,36 @@ cost (a standing non-goal to move it to the GPU).
 - **16-bit** inputs are handled as 8-bit on the GPU path (documented non-goal).
 - Re-measure any time with the command at the top; the numbers above are a
   snapshot, not a contract.
+
+## T9-lite: GPU-busy vs wall (VkQueryPool timestamps)
+
+The bench now reports GPU-busy ms (query-pool timestamps per submit) beside wall
+ms. This separates compute from submit/fence/PCIe overhead and cuts through the
+±15% wall noise. Discrete RX 6600M:
+
+| size | create wall | create **GPU** | compare wall | compare **GPU** |
+|---|---|---|---|---|
+| 320×200 | 1.47 | 0.35 | 1.00 | 0.21 |
+| 1024² | 14.20 | 1.80 | 9.60 | 2.03 |
+| 2048² | 91.60 | **4.78** | 31.46 | 6.96 |
+| 4096² | 421.11 | **20.96** | 190.32 | 26.67 |
+
+**Finding (reframes the optimization plan):** GPU compute is a small fraction of
+wall — at 2048², `create_image` is 91.6 ms wall but only 4.8 ms GPU-busy. A
+CPU-phase probe attributed the gap: `downsample ≈ 10 ms`, `submit+fence ≈ 7 ms`,
+and **`prep ≈ 52–92 ms`** (interleave→staging upload + alloc + pass recording).
+`prep` scales with *pixels* (10 ms at 1024² → ~90 ms at 2048²) while the pass
+count is constant, so it is the **host→staging upload**, not recording or compute.
+
+Consequences for the track order:
+- **T5 (2D dispatch / workgroup / compute tuning) is low-value** — it optimizes
+  the 4.8 ms GPU slice of a 91 ms operation (~2% of wall). The doc's own §2.3
+  warns "doing compute-better first is profiling theater"; the measurement
+  confirms it here.
+- **The real bottleneck is the upload path.** On discrete it is host→staging
+  (PCIe/BAR); on integrated/UMA the staging write is cheap but the
+  staging→device `CopyBuffer` is a redundant device-internal copy — which is
+  exactly what **T7 (UMA zero-copy)** removes. T7 is therefore the top actionable
+  track, not T5.
+- Recording/descriptor cost (T3/T10) is a small constant (the ~7 ms `disp` plus
+  part of `prep`), so it matters at small sizes, not large.
