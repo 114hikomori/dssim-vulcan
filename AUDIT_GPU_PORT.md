@@ -222,13 +222,18 @@ changed. Claims re-observed, not trusted:
 `score.rs` `create_image` (RGB): `s.lab` and `s.img` are allocated `STORAGE_BUFFER`
 only, then used as `Pass::CopyBuffer` src/dst. `vkCmdCopyBuffer` requires
 `TRANSFER_SRC`/`TRANSFER_DST` (VUID-vkCmdCopyBuffer-srcBuffer-00118/-00120) —
-undefined behavior per spec. It runs today only because validation layers are
-silently absent on this machine (F26) and the AMD driver is permissive. A strict
-driver or a validation-enabled CI leg would fail. Cheapest real fix: have
+undefined behavior per spec. It runs today only because the AMD driver is permissive — validation was on
+but its VUID report was invisible under libtest capture (see F26 correction). A strict
+driver or a validation-enabled CI leg would fail. *(Pass 3: validation was in
+fact on and reporting this — the VUID output was swallowed by libtest capture,
+so it survived review unnoticed.)* Cheapest real fix: have
 `lab_into` write plane 0 (L) directly into `img_all` at dst_off=0 — the whole
 copy exists only to seed plane 0, so it disappears along with the violation.
 
 **F26 (medium, process) — "verified on GPU" runs without validation and nobody knows.**
+*(Pass-3 correction: the mechanism below was wrong — validation was enabled all
+along; its output was invisible because libtest captures stderr without
+`--nocapture`. Conclusion and fix direction stood. See Pass 3.)*
 `context.rs:78-87` enables validation only `if installed`; on this machine the
 Khronos layer exists at `C:\VulkanSDK\1.4.357.0\Bin\VkLayer_khronos_validation.json`
 but is not registered (implicit-layer registry has only Steam overlay) and
@@ -303,3 +308,75 @@ worth paying down before pushing to 4K sizes.
 - Bench numbers are single-run on a warm laptop GPU; ±10% noise, direction stable.
 - F25's "would fail on strict drivers" is spec-based inference, not observed —
   no validation-enabled run exists on this machine to demonstrate it.
+
+---
+
+## Pass 3 — fix batch verification (`b63ebd5`..`878de7a`, "all findings addressed" claim)
+
+Date: 2026-09-06, pinned to HEAD `878de7a`. The implementing agent claims every
+Pass-1/Pass-2 finding (F1–F33) is closed. Re-observed, not trusted:
+
+| Claim | Reproduced? |
+|---|---|
+| full workspace green WITH validation, 0 vulkan errors | YES — `cargo test --workspace` exit 0, all suites ok; `--nocapture` probe: "validation layer: ENABLED" ×5, zero `[vulkan ERROR]`/`VUID-` lines |
+| F25 fixed by deleting the illegal copy | YES — `lab_all`/`s.lab` gone (0 matches); Lab written straight into `img_all` |
+| F27 mu_all → GpuOnly | YES |
+| F29 compare asserts ref/mod dims | YES — score.rs:360 |
+| F32 CopyBuffer asserts equal size | YES — pipeline.rs, with F32 comment |
+| F33 pc_bytes deleted, dead `_stride` gone | YES — only `pc_bytes_off`/`pc_mul_bytes` remain |
+| F28 split-submit seam + measured peak (25.1 vs 18.9 MB @512²) | YES — `SPLIT_SUBMIT_MIN_PIXELS=6M`, both split tests present and green |
+| F1 flush/invalidate added | YES — transfer.rs `sync_host_range(flush)` |
+| F7 gpu_cli can't pass vacuously | YES — asserts positive `dssim: gpu device:` line, hard-FAIL on fallback-with-device, explicit SKIP only when no device; strictly stronger |
+| F13 ICC demonstrated empirically | YES — profile.png has iCCP, stripped lacks it, sizes differ; test green (dssim 0.0 only possible if profile applied) |
+| F21 CI: validation install + grep gate + clippy `-D warnings` | YES — ci.yml:18/45-48/30-31; the `--nocapture` discovery (13b13cb) is the right fix for a vacuous grep gate |
+| F19 correction (no gray→GPU CLI routing) | YES — `run_gpu` uses `load_image_rgba` only; `image_gray` is CPU-only. Their correction of MY pass-1 finding is accurate and was appended, not history-edited |
+| no test weakening | YES — zero removed assert/skip lines on the minus side of all test diffs |
+| GPU beats CPU at all sizes (0.50/0.34/0.44, 4K 0.45) | YES — re-run: 0.63/0.37/0.43/0.45 incl. 4096², no OOM; dssim_check byte-identical to Pass-2 values (parity preserved) |
+| SPV freshness after comment-only shader edits | YES — 7/7 hash match |
+
+### Correction to this audit's own Pass 2
+
+**F26's mechanism was wrong.** I inferred "validation silently OFF on this
+host" from (a) no validation lines in captured logs and (b) the implicit-layer
+registry showing only Steam. (a) was libtest swallowing stderr without
+`--nocapture`, and (b) the loader finds the SDK layer through paths my registry
+probe didn't enumerate. Validation was in fact ENABLED all along — which means
+the F25 VUID violation was being *reported* during Pass-2 runs, just invisibly.
+The finding's conclusion (validation state must be printed; claims must be
+provable) stands and their fix (print ENABLED / WANTED-but-NOT-FOUND + CI
+`--nocapture` grep gate) closes it properly. Lesson recorded: absence of
+captured output is not evidence of absence — same trap the CI gate fell into.
+
+### New findings (process, not code)
+
+**P1 (process) — CI config modified without a recorded authorization.**
+AGENTS.md §8 prohibits touching CI config "absent explicit instruction
+otherwise". `37d9fd8`/`13b13cb` modify `.github/workflows/ci.yml`; the
+checkpoints justify it under M8 scope but record "Deviated from plan: none"
+and quote no user instruction for the CI change itself. If the human did
+authorize it in the implementing session, append that quote to the checkpoint;
+if not, this needs a look.
+**P2 (process) — five pushes to origin/main this day.** The `d128cbb`
+checkpoint quotes authorization ("push to check") that this auditor cannot
+verify from its own session. Flagging for the human: confirm those pushes were
+yours/authorized; if yes, add the quote to the relevant entries per §6.
+
+**P3 (resource safety) — concurrent GPU test runs collide.** First full
+`cargo test --workspace` of this pass aborted mid-way (exit ≠0, no FAILED line,
+last suites never ran) while the implementing agent's session was active;
+identical command immediately after: green. GPU suites are not safe to run
+concurrently (AGENTS.md §7) — serialize heavy runs; consider a machine-wide
+lock file in the test harness if both agents keep working in parallel.
+
+**P4 (nit) — small-image ratio drift.** 320x200 measured 0.63 here vs 0.50
+reported; still <1.0 so the "wins at all sizes" conclusion holds, but the
+small-size margin is the noisiest and should be quoted as a range, not a point.
+
+### Pass 3 verdict
+
+**VERIFIED.** "ALL findings F1–F33 addressed" reproduces on every
+observationally checkable claim, with no weakened checks, no deleted tests,
+and one honest correction of this audit's own faulty inference. Remaining
+items are process (P1/P2 — human confirmation) and the pre-existing open
+question from `c4ee8d4`: M10 sign-off on the integrated GPU + CI lavapipe leg
+with the optimized path (CI run #8 pending per `878de7a`).
