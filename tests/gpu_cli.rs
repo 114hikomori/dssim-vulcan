@@ -14,6 +14,19 @@
 #![cfg(feature = "gpu")]
 
 use std::process::Command;
+use std::sync::{Mutex, MutexGuard};
+
+/// F8: the two tests below each spawn a `dssim --gpu` subprocess. Cargo runs
+/// them on parallel harness threads within this one test binary, so without
+/// serialization there are up to 2 concurrent GPU contexts — which the AMD
+/// Windows driver can reject with INCOMPLETE (see CHECKPOINT M1). This
+/// process-local mutex serializes them (one subprocess at a time). It cannot
+/// span other test binaries; the suite is run with --test-threads=1 for that.
+static GPU_LOCK: Mutex<()> = Mutex::new(());
+
+fn gpu_lock() -> MutexGuard<'static, ()> {
+    GPU_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 const TOL: f64 = 5e-6;
 
@@ -62,6 +75,7 @@ fn parse_scores(stdout: &[String]) -> Vec<(String, f64)> {
 
 #[test]
 fn gpu_cli_matches_cpu() {
+    let _serial = gpu_lock();
     let cpu = run_cli(&["tests/test1-sm.png", "tests/test2-sm.png"]);
     assert!(cpu.success, "CPU run failed:\n{}", cpu.stderr);
     let gpu = run_cli(&["--gpu", "tests/test1-sm.png", "tests/test2-sm.png"]);
@@ -117,6 +131,7 @@ fn gpu_cli_matches_cpu() {
 
 #[test]
 fn gpu_cli_size_mismatch_matches_cpu_error() {
+    let _serial = gpu_lock();
     // Different-size inputs: both paths must fail (the error text goes to
     // stderr; we only assert failure, which is the behavioral contract — it
     // holds whether or not the GPU path engaged, so no skip logic needed).

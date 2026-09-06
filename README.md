@@ -32,7 +32,9 @@ You can save an image visualising the difference between the files:
 There is an experimental Vulkan compute backend. It gives the same scores
 within a small floating-point tolerance (≤0.000005), but requires a Vulkan
 driver and ignores `-o` for now. It falls back to the CPU automatically when
-Vulkan is unavailable:
+Vulkan is unavailable. Color profiles are applied identically to the CPU path
+(same decoder). Note that 16-bit images are handled as 8-bit on the GPU path,
+so very high-bit-depth inputs are a known gap (not yet at full precision):
 
     dssim --gpu file.png file-modified.png
 

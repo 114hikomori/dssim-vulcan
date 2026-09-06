@@ -1,9 +1,12 @@
 //! `dssim-vulkan` — Vulkan compute backend for DSSIM, porting the
 //! `dssim-core` kernels to GPU without changing their CPU-path semantics.
 //!
-//! Plan: `dssim-vulkan-fable-plan.md` / `VULKAN_PORT_PLAN.md`. This module is
-//! currently Phase B: the minimal runtime (context, allocator, staging
-//! transfers, compute dispatch) proven by the ×2 smoke shader.
+//! Plan: `dssim-vulkan-fable-plan.md` / `VULKAN_PORT_PLAN.md`. Through Phase H
+//! (M10): the full multi-scale DSSIM runs on the GPU — Lab conversion, blur
+//! statistics, and the SSIM combine — driven by [`GpuSsim`] (`create_image` /
+//! `compare`) with CPU f64 pooling, exposed via the `--gpu` CLI flag. See
+//! `CHECKPOINT.md` for the current milestone and `AUDIT_GPU_PORT.md` for the
+//! rolling correctness review.
 
 pub mod blur;
 pub mod color;

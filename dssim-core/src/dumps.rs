@@ -18,8 +18,12 @@
 //! ```
 //!
 //! A directory of dumps is accompanied by a `MANIFEST.txt` listing every file
-//! with a FNV-1a hash of its bytes, so two runs can be compared byte-for-byte
-//! via their manifests.
+//! with a hash of its bytes, so two runs can be compared byte-for-byte via
+//! their manifests. The hash is `std`'s `DefaultHasher` (SipHash-1-3), NOT a
+//! fixed FNV-1a — so it is stable within a toolchain but **not guaranteed
+//! across Rust releases**. Manifests are therefore for same-run / same-toolchain
+//! reproducibility checks, not long-lived cross-version goldens; if they ever
+//! become committed goldens, pin a stable hash (audit F17).
 //!
 //! Cross-image-run ordering is not encoded in files; the manifest order plus
 //! the generation log (`run.log`) carries it. The reproducibility check

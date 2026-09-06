@@ -5,8 +5,8 @@
 // they are the exact f32 values computed by blur.rs's own expressions.
 //
 // Push constant layout (std430-style, 56 bytes):
-//   dims : uvec4  (width, height, src_stride, src2_stride)
-//   dims2: uvec4  (dst_stride, 0, 0, 0)
+//   dims : uvec4  (width, height, src_stride, src_off)
+//   dims2: uvec4  (dst_stride, dst_off, 0, 0)
 //   k1   : vec4   (K5_OUTER, K5_INNER, K5_MID, K5_EDGE_CENTER)
 //   k2   : vec2   (K5_EDGE_NEAR, K5_EDGE_FAR)
 

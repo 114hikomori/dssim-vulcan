@@ -26,6 +26,20 @@ impl std::fmt::Display for Error {
     }
 }
 
-impl std::error::Error for Error {}
+impl std::error::Error for Error {
+    // F6: expose the wrapped cause so callers (e.g. main.rs's `e.source()`)
+    // can print the underlying loader/Vulkan/allocator error, not just the
+    // top-level message. Critical for field diagnosis of device-lost /
+    // allocator failures.
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Error::Loader(e) => Some(e),
+            Error::Vulkan(e) => Some(e),
+            Error::Allocator(e) => Some(e),
+            Error::NoDevice => None,
+            Error::Shader(_) => None,
+        }
+    }
+}
 
 pub type Result<T> = std::result::Result<T, Error>;

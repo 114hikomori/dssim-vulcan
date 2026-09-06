@@ -1,6 +1,6 @@
 #version 450
 // SSIM combine, 3-channel — exact transcription of dssim.rs
-// compare_scale_3ch (lines 335-395): per-pixel f32 arithmetic with mul_add
+// compare_scale_3ch (dssim.rs:377-438): per-pixel f32 arithmetic with mul_add
 // (fma) at exactly the two designated sites, and 1/3 as an inv3 multiply.
 //
 // Role buffers hold concatenated planes (plane stride = width), channel
@@ -9,7 +9,7 @@
 //   sq_o / sq_m : 3 planes each (img_sq_blur of original / modified)
 //   cross       : 3 planes (img1_img2_blur)
 //
-// Push constant layout (56 bytes, mirrors BlurPC):
+// Push constant layout (48 bytes):
 //   dims : uvec4 (width, height, 0, 0)
 //   dims2: uvec4 (dst_stride, 0, 0, 0)
 //   k    : vec4  (c1 = 0.01*0.01, c2 = 0.03*0.03, inv3 = 1.0/3.0, unused)

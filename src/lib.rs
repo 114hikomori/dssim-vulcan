@@ -21,10 +21,15 @@ fn load(attr: &Dssim, path: &Path) -> Result<DssimImage<f32>, load_image::Error>
     }.expect("infallible"))
 }
 
-/// Decode a file to 8-bit RGBA (sRGB, non-premultiplied) **without** color
-/// profile conversion — the raw input format the GPU path consumes. Note:
-/// unlike [`load_image`], this skips ICC profile handling; images with
-/// non-sRGB profiles will differ from the CPU path's decoding.
+/// Decode a file to 8-bit RGBA (sRGB, non-premultiplied) — the raw input
+/// format the GPU path consumes. This calls the **same** `load_image::load_path`
+/// as the CPU [`load`], so embedded ICC profiles are applied identically on
+/// both paths. (An earlier note here claimed this skipped ICC and "would
+/// differ from the CPU path's decoding" — that was wrong; corrected per audit
+/// F13.) The only difference from [`load`] is the returned form (raw
+/// `ImgVec<RGBAPLU>` for the GPU vs an immediate `DssimImage`) and the
+/// pixel-format trait (`to_rgbaplu` vs `to_rgblu`), which is equivalent for the
+/// downstream Lab conversion.
 pub fn load_image_rgba(path: impl AsRef<Path>) -> Result<ImgVec<RGBAPLU>, load_image::Error> {
     let img = load_image::load_path(path)?;
     match img.bitmap {

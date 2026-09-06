@@ -295,16 +295,21 @@ impl Context {
                 p_command_buffers: std::slice::from_ref(&cb).as_ptr(),
                 ..Default::default()
             };
-            self.device
-                .queue_submit(self.queue, std::slice::from_ref(&submit), fence)
-                .map_err(Error::Vulkan)?;
-            self.device
-                .wait_for_fences(std::slice::from_ref(&fence), true, u64::MAX)
-                .map_err(Error::Vulkan)?;
-
+            let result = (|| -> Result<(), Error> {
+                self.device
+                    .queue_submit(self.queue, std::slice::from_ref(&submit), fence)
+                    .map_err(Error::Vulkan)?;
+                self.device
+                    .wait_for_fences(std::slice::from_ref(&fence), true, u64::MAX)
+                    .map_err(Error::Vulkan)?;
+                Ok(())
+            })();
+            // F2: release the fence + command buffer on EVERY path, including
+            // a submit/wait error -- the previous `?` skipped this cleanup and
+            // leaked both.
             self.device.destroy_fence(fence, None);
             self.device.free_command_buffers(self.command_pool, std::slice::from_ref(&cb));
-            Ok(())
+            result
         }
     }
 }

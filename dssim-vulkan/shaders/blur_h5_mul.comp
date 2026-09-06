@@ -3,9 +3,9 @@
 // transcription of blur.rs blur_h5_mul: same 4-case boundary handling,
 // applied to q[i] = src1[i] * src2[i]. Weights via push constants.
 //
-// Push constant layout (48 bytes):
-//   dims : uvec4  (width, height, src1_stride, src2_stride)
-//   dims2: uvec4  (dst_stride, 0, 0, 0)
+// Push constant layout (56 bytes):
+//   dims : uvec4  (width, height, src1_stride, src1_off)
+//   dims2: uvec4  (dst_stride, src2_stride, src2_off, dst_off)
 //   k1   : vec4   (K5_OUTER, K5_INNER, K5_MID, K5_EDGE_CENTER)
 //   k2   : vec2   (K5_EDGE_NEAR, K5_EDGE_FAR)
 //

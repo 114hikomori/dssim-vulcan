@@ -143,9 +143,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 /// The `--gpu` comparison path. Image decoding, color profiles, sRGB
 /// linearization, premultiplication, and the 2×2 downsample stay on the CPU
 /// (dssim-core); the Lab conversion, statistics, SSIM combine, and score run
-/// through the Vulkan backend. Output format is byte-identical to the CPU
-/// path (`{dssim:.8}\t{file}`). Map writing is CPU-only for now: the GPU
-/// path returns pooled scores, not SsimMaps (Phase G limitation).
+/// through the Vulkan backend. Output uses the same `{dssim:.8}\t{file}`
+/// *format* as the CPU path, but the score *values* can differ in the last
+/// decimals from GPU floating-point drift (within the 5e-6 parity bound; not
+/// byte-identical — see CHECKPOINT M6). Map writing is CPU-only for now: the
+/// GPU path returns pooled scores, not SsimMaps (Phase G limitation).
 #[cfg(feature = "gpu")]
 fn run_gpu(map_output_file: Option<&String>, files: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     use imgref::ImgVec;

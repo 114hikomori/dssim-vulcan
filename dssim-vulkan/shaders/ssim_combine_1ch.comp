@@ -1,9 +1,9 @@
 #version 450
 // SSIM combine, 1-channel — exact transcription of dssim.rs compare_scale
-// (lines 397-436, the scalar L=f32 path for gray inputs): no inv3, fma at
+// (dssim.rs:440-479, the scalar L=f32 path for gray inputs): no inv3, fma at
 // the same two designated sites.
 //
-// Push constant layout (56 bytes, mirrors BlurPC):
+// Push constant layout (48 bytes):
 //   dims : uvec4 (width, height, 0, 0)
 //   dims2: uvec4 (dst_stride, 0, 0, 0)
 //   k    : vec4  (c1 = 0.01*0.01, c2 = 0.03*0.03, unused, unused)
