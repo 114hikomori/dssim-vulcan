@@ -208,6 +208,15 @@ on discrete.
 Risk: low; keep discrete path unchanged.
 Exit: integrated-device bench improves; CI runtime drops.
 
+**Result / F34 correction:** the "keep discrete path unchanged" assumption was
+wrong. Detection was first written as `intersects(DEVICE_LOCAL|HOST_VISIBLE)`
+(an OR that matches a pure-DEVICE_LOCAL type), so a ReBAR discrete GPU also took
+the zero-copy path — the discrete win was real but accidental and unmeasured.
+Fixed to `contains()` (a single type with *both* flags = true UMA or ReBAR VRAM).
+A/B on the discrete RX 6600M then confirmed zero-copy is the better choice there
+too at large sizes (2048² 67 vs 91 ms, 4096² 278 vs 323 ms create), so it is now
+a measured decision; a non-ReBAR discrete correctly falls back to staging.
+
 ### T8 — Batch mode (CLI-level amortization)
 `dssim --gpu original.png mod1..modN`: keep the original's GPU-resident
 pyramid once (T1/T2 make this natural), pipeline pairs (T4). This is where

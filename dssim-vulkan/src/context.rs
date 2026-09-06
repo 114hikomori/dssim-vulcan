@@ -202,13 +202,26 @@ impl Context {
                 .to_string_lossy()
                 .into_owned();
             let device_type = props.device_type;
-            // T7: UMA if any memory type is both DEVICE_LOCAL and HOST_VISIBLE.
+            // T7/F34: unified iff a SINGLE memory type is BOTH DEVICE_LOCAL and
+            // HOST_VISIBLE (true UMA, or ReBAR where VRAM is CPU-mappable).
+            // `contains` (AND), not `intersects` (OR): a discrete GPU without
+            // ReBAR has a pure-DEVICE_LOCAL type and a pure-HOST_VISIBLE type
+            // separately, and OR-matching those would wrongly route the shader's
+            // source buffer to system RAM (CpuToGpu) to be read over PCIe.
             let mem_props = instance.get_physical_device_memory_properties(physical_device);
             let is_unified_memory = mem_props.memory_types_as_slice().iter().any(|mt| {
-                mt.property_flags.intersects(
+                mt.property_flags.contains(
                     vk::MemoryPropertyFlags::DEVICE_LOCAL | vk::MemoryPropertyFlags::HOST_VISIBLE,
                 )
             });
+            // Measurement/debug override so staging-vs-zero-copy can be A/B'd on
+            // one device (DSSIM_UNIFIED=0 forces the staging path, =1 forces
+            // zero-copy). Unset => the detection above.
+            let is_unified_memory = match std::env::var("DSSIM_UNIFIED").as_deref() {
+                Ok("0") => false,
+                Ok("1") => true,
+                _ => is_unified_memory,
+            };
 
             let queue_priorities = [1.0];
             let queue_info = vk::DeviceQueueCreateInfo::default()
@@ -290,8 +303,9 @@ impl Context {
         self.device_type
     }
 
-    /// T7: whether this device has unified (shared CPU/GPU) memory, so the
-    /// upload path can write straight into the shader's source buffer.
+    /// T7/F34: whether a memory type is both DEVICE_LOCAL and HOST_VISIBLE
+    /// (true UMA, or ReBAR-mapped VRAM), so the upload path can write straight
+    /// into the shader's source buffer instead of staging + CopyBuffer.
     pub fn is_unified_memory(&self) -> bool {
         self.is_unified_memory
     }

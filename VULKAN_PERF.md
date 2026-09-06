@@ -113,12 +113,19 @@ streaming absorbs it). It was the **per-pixel `PixelsIter` loop**, which is a
 disguised memcpy (`RGBAPLU` is `repr(C) [f32;4]`). Fixed: `to_contiguous_buf →
 copy_from_slice`. 4K create 421→338 ms (~20%), 2048² ~6%.
 
-**T7** (UMA zero-copy): on unified-memory devices (DEVICE_LOCAL∩HOST_VISIBLE —
-integrated Radeon, llvmpipe/CI) `create_image` writes the shader's source buffer
+**T7** (zero-copy upload): when a memory type is **both** DEVICE_LOCAL and
+HOST_VISIBLE (true UMA — integrated Radeon, llvmpipe/CI — **or ReBAR-mapped
+VRAM on a discrete GPU**), `create_image` writes the shader's source buffer
 directly, dropping the staging buffer and the `staging→device` `CopyBuffer`.
-Discrete keeps the staging path. Detection is a memory-property scan (not
-`device_type`, since llvmpipe reports as CPU). Parity + validation clean on both
-paths.
+Detection is a `contains()` scan of a single memory type (F34: an earlier
+`intersects()` OR-test wrongly matched a pure-DEVICE_LOCAL type, so the claim
+"discrete keeps the staging path" was false — a ReBAR discrete also took
+zero-copy). Both GPUs on this host have such a type, so **both** take zero-copy.
+Measured A/B on the discrete RX 6600M (`DSSIM_UNIFIED` override, `create_ms`):
+zero-copy wins at large sizes (2048² 67 vs 91 ms, 4096² 278 vs 323 ms), wash at
+≤1024². So zero-copy-on-discrete is now a *measured* choice, not an accident; a
+non-ReBAR discrete (no both-flags type) correctly falls back to staging. Parity +
+validation clean on both paths.
 
 **Where the time is now** (discrete, 2048²): create ≈ CPU downsample (~10 ms, a
 non-goal to move) + WC transfer (~24 ms/64 MB, hardware floor) + recording.
