@@ -655,3 +655,13 @@ Milestone ids refer to `dssim-vulkan-fable-plan.md` §16 (also listed in `AGENTS
 - Blocked / open question: P5 pending the user's confirmation of the run-#11 push.
 - Next: user decides on P5 (was run #11 push authorized?) and whether to push the
   F34 fix + audit commit fbf67f8 (currently 2 ahead of origin, NOT pushed).
+
+## 2026-09-07 — P5 closed (user confirmed)
+- P5 resolved: user states the run-#11 push was authorized by them directly
+  ("push ล่าสุดฉันบอกนายไปเอง"). So it was NOT a 5 violation -- the only gap
+  was that I recorded "Next: push" instead of quoting the user's authorization
+  at push time, as 5 requires. Standing correction: quote the exact
+  authorization words in the checkpoint whenever I push.
+- Still unpushed (need the user's word, not assumed): fbf67f8 (audit pass 6) +
+  61bd7c8 (F34 fix). Confirming a PAST push does not authorize a FUTURE one.
+- Next: ask the user whether to push the 2 local commits.
