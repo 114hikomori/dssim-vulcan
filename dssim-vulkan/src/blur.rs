@@ -61,6 +61,71 @@ impl BlurPipelines {
         })
     }
 
+    /// Push a single H5 pass into a sequence (plane-offset aware): reads
+    /// plane `src_off` of `src`, writes plane `dst_off` of `dst`.
+    pub(crate) fn h5_into<'a>(
+        &'a self,
+        passes: &mut Vec<Pass<'a>>,
+        src: Buffer,
+        tmp: Buffer,
+        width: usize,
+        height: usize,
+        stride: usize,
+        src_off: u32,
+        dst_off: u32,
+    ) {
+        let k5_ref = dssim_core::blur::K5_REF;
+        passes.push(Pass::Compute {
+            pipeline: &self.h5,
+            buffers: vec![src.clone(), tmp.clone()],
+            push: pc_bytes_off(width, height, stride, src_off, width, dst_off, &k5_ref),
+            groups: ((width * height) as u32).div_ceil(64),
+        });
+    }
+
+    /// Push a single V5 pass into a sequence (tight src/dst + plane offsets).
+    pub(crate) fn v5_into<'a>(
+        &'a self,
+        passes: &mut Vec<Pass<'a>>,
+        tmp: Buffer,
+        dst: Buffer,
+        width: usize,
+        height: usize,
+        _stride: usize,
+        dst_off: u32,
+    ) {
+        let k5_ref = dssim_core::blur::K5_REF;
+        passes.push(Pass::Compute {
+            pipeline: &self.v5,
+            buffers: vec![tmp.clone(), dst.clone()],
+            push: pc_bytes_off(width, height, width, 0, width, dst_off, &k5_ref),
+            groups: ((width * height) as u32).div_ceil(64),
+        });
+    }
+
+    /// Push a single fused H5-multiply pass into a sequence (plane-offset aware).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn h5_mul_into<'a>(
+        &'a self,
+        passes: &mut Vec<Pass<'a>>,
+        src1: Buffer,
+        src2: Buffer,
+        tmp: Buffer,
+        width: usize,
+        height: usize,
+        stride1: usize,
+        src1_off: u32,
+        src2_off: u32,
+        dst_off: u32,
+    ) {
+        let k5_ref = dssim_core::blur::K5_REF;
+        passes.push(Pass::Compute {
+            pipeline: &self.h5_mul,
+            buffers: vec![src1, src2, tmp],
+            push: pc_mul_bytes(width, height, stride1, src1_off, stride1, src2_off, width, dst_off, &k5_ref),
+            groups: ((width * height) as u32).div_ceil(64),
+        });
+    }
     /// GPU `blur` of host data: upload → H5 → V5 → download. `data` may be
     /// strided (`stride >= width`); result is tightly packed.
     pub fn blur(&self, data: &[f32], width: usize, height: usize, stride: usize) -> Result<Vec<f32>> {
@@ -87,15 +152,15 @@ impl BlurPipelines {
         )?;
         let pixels = (width * height) as u32;
 
-        let h_pass = Pass {
+        let h_pass = Pass::Compute {
             pipeline: &self.h5,
-            buffers: vec![&src, &tmp],
+            buffers: vec![src.clone(), tmp.clone()],
             push: pc_bytes(width, height, stride, 0, width, &k5_ref),
             groups: pixels.div_ceil(64),
         };
-        let v_pass = Pass {
+        let v_pass = Pass::Compute {
             pipeline: &self.v5,
-            buffers: vec![&tmp, &dst],
+            buffers: vec![tmp.clone(), dst.clone()],
             push: pc_bytes(width, height, width, 0, width, &k5_ref),
             groups: pixels.div_ceil(64),
         };
@@ -140,15 +205,15 @@ impl BlurPipelines {
         )?;
         let pixels = (width * height) as u32;
 
-        let h_pass = Pass {
+        let h_pass = Pass::Compute {
             pipeline: &self.h5_mul,
-            buffers: vec![&s1, &s2, &tmp],
-            push: pc_bytes(width, height, stride1, stride2, width, &k5_ref),
+            buffers: vec![s1.clone(), s2.clone(), tmp.clone()],
+            push: pc_mul_bytes(width, height, stride1, 0, stride2, 0, width, 0, &k5_ref),
             groups: pixels.div_ceil(64),
         };
-        let v_pass = Pass {
+        let v_pass = Pass::Compute {
             pipeline: &self.v5,
-            buffers: vec![&tmp, &dst],
+            buffers: vec![tmp.clone(), dst.clone()],
             push: pc_bytes(width, height, width, 0, width, &k5_ref),
             groups: pixels.div_ceil(64),
         };
@@ -203,4 +268,53 @@ pub fn blur_mul_gpu(
 ) -> Result<Vec<f32>> {
     let pipelines = BlurPipelines::new(context)?;
     pipelines.blur_mul(src1, src2, width, height, stride1, stride2)
+}
+
+/// Push-constant bytes with src/dst plane offsets (byte offsets into the
+/// bound buffers): dims = (width, height, src_stride_elems, src_off_elems),
+/// dims2 = (dst_stride_elems, dst_off_elems).
+#[allow(clippy::too_many_arguments)]
+fn pc_bytes_off(
+    width: usize,
+    height: usize,
+    src_stride: usize,
+    src_off: u32,
+    dst_stride: usize,
+    dst_off: u32,
+    k5_ref: &[f32; 6],
+) -> Vec<u8> {
+    let pc = BlurPC {
+        dims: [width as u32, height as u32, src_stride as u32, src_off],
+        dims2: [dst_stride as u32, dst_off, 0, 0],
+        k1: [k5_ref[0], k5_ref[1], k5_ref[2], k5_ref[3]],
+        k2: [k5_ref[4], k5_ref[5]],
+    };
+    unsafe {
+        std::slice::from_raw_parts(&pc as *const BlurPC as *const u8, std::mem::size_of::<BlurPC>())
+    }
+    .to_vec()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn pc_mul_bytes(
+    width: usize,
+    height: usize,
+    src1_stride: usize,
+    src1_off: u32,
+    src2_stride: usize,
+    src2_off: u32,
+    dst_stride: usize,
+    dst_off: u32,
+    k5_ref: &[f32; 6],
+) -> Vec<u8> {
+    let pc = BlurPC {
+        dims: [width as u32, height as u32, src1_stride as u32, src1_off],
+        dims2: [dst_stride as u32, src2_stride as u32, src2_off, dst_off],
+        k1: [k5_ref[0], k5_ref[1], k5_ref[2], k5_ref[3]],
+        k2: [k5_ref[4], k5_ref[5]],
+    };
+    unsafe {
+        std::slice::from_raw_parts(&pc as *const BlurPC as *const u8, std::mem::size_of::<BlurPC>())
+    }
+    .to_vec()
 }

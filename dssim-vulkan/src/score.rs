@@ -19,8 +19,12 @@ use imgref::ImgVec;
 
 use crate::blur::BlurPipelines;
 use crate::context::Context;
-use crate::ssim::{ssim_combine_pipelines, SsimPipelines};
+use crate::pipeline::{dispatch_sequence, Pass};
+use crate::ssim::SsimPipelines;
+use crate::transfer::Buffer;
 use crate::Result;
+
+use ash::vk;
 
 // `Downsample` is trait-scoped on dssim-core's image types.
 use dssim_core::Downsample as _;
@@ -51,26 +55,30 @@ pub struct GpuSsim {
     #[allow(dead_code)]
     context: Arc<Context>,
     blur: BlurPipelines,
+    color: crate::color::ColorPipelines,
     ssim: SsimPipelines,
 }
 
 impl GpuSsim {
     pub fn new(context: Arc<Context>) -> Result<Self> {
         let blur = BlurPipelines::new(&context)?;
+        let color = crate::color::ColorPipelines::new(&context)?;
         let ssim = SsimPipelines::new(&context)?;
-        Ok(Self { context, blur, ssim })
+        Ok(Self { context, blur, color, ssim })
     }
 
-    /// Materialize all pyramid scales of one image: per scale, GPU Lab
-    /// conversion + GPU statistics, then CPU 2×2 downsample for the next.
-    ///
-    /// Scale-count semantics replicate dssim-core exactly: one scale per
-    /// weight (plus the one the CPU generates but never uses — it is dropped
-    /// by the weight zip in `compare_inner`, so it is simply not generated
-    /// here), stopping when `Downsample` returns None (w<8 || h<8).
+    /// Materialize the whole pyramid in ONE GPU submit: per scale, staging
+    /// copy -> GPU Lab -> per-channel pre-blur/mu/sq_blur chains (all
+    /// GPU-resident; results stay on the device for `compare`). The CPU only
+    /// interleaves the input planes and runs the 2x2 downsample between
+    /// scales. Scale-count semantics replicate dssim-core exactly: one scale
+    /// per weight, stopping when `Downsample` returns None (w<8 || h<8).
     pub fn create_image(&self, src: &ImgVec<dssim_core::RGBAPLU>) -> Result<GpuSsimImage> {
-        let mut scales: Vec<ScaleData> = Vec::new();
         let mut current: Option<ImgVec<dssim_core::RGBAPLU>> = Some(src.clone());
+
+        let mut passes: Vec<Pass> = Vec::new();
+
+        let mut keep: Vec<ScaleKeep> = Vec::new();
 
         for _ in 0..DEFAULT_WEIGHTS.len() {
             let img = match current.take() {
@@ -78,22 +86,117 @@ impl GpuSsim {
                 None => break,
             };
             let (w, h) = (img.width(), img.height());
-            let mut inter = Vec::with_capacity(w * h * 4);
+            let pixels = w * h;
+
+            // Staging: interleaved RGBA (CPU-owned data, one copy to device).
+            let mut inter = Vec::with_capacity(pixels * 4);
             for px in img.pixels() {
                 inter.extend_from_slice(&[px.r, px.g, px.b, px.a]);
             }
-            let planes = crate::color::rgba_to_lab_gpu(&self.context, &inter, w, h, 3)?;
-            scales.push(self.make_scale(&planes, w, h, 3)?);
+            let staging = self.context.alloc_buffer(
+                "s.staging",
+                (inter.len() * 4) as u64,
+                vk::BufferUsageFlags::TRANSFER_SRC,
+                gpu_allocator::MemoryLocation::CpuToGpu,
+            )?;
+            crate::transfer::write_mapped(&staging, &pack_f32(&inter))?;
+            let rgba_buf = self.context.alloc_buffer(
+                "s.rgba",
+                (inter.len() * 4) as u64,
+                vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::STORAGE_BUFFER,
+                gpu_allocator::MemoryLocation::GpuOnly,
+            )?;
+            passes.push(Pass::CopyBuffer { src: staging.clone(), dst: rgba_buf.clone() });
+
+            // Lab planes (3 planes in one buffer, plane stride = width).
+            let lab_all = self.context.alloc_buffer(
+                "s.lab",
+                (pixels * 3 * 4) as u64,
+                vk::BufferUsageFlags::STORAGE_BUFFER,
+                gpu_allocator::MemoryLocation::GpuOnly,
+            )?;
+            self.color.lab_into(&mut passes, rgba_buf.clone(), lab_all.clone(), w, h, 3);
+
+            // img_all: plane 0 = raw L (copy), planes 1,2 = chroma pre-blur.
+            let img_all = self.context.alloc_buffer(
+                "s.img",
+                (pixels * 3 * 4) as u64,
+                vk::BufferUsageFlags::STORAGE_BUFFER,
+                gpu_allocator::MemoryLocation::GpuOnly,
+            )?;
+            passes.push(Pass::CopyBuffer { src: lab_all.clone(), dst: img_all.clone() }); // plane 0 (offset 0..pixels)
+            let tmp = self.context.alloc_buffer(
+                "s.tmp",
+                (pixels * 4) as u64,
+                vk::BufferUsageFlags::STORAGE_BUFFER,
+                gpu_allocator::MemoryLocation::GpuOnly,
+            )?;
+            for c in 1..3u32 {
+                let off = c * pixels as u32;
+                self.blur.h5_into(&mut passes, lab_all.clone(), tmp.clone(), w, h, w, off, 0);
+                self.blur.v5_into(&mut passes, tmp.clone(), img_all.clone(), w, h, w, off);
+            }
+
+            // mu (blur of img) and sq (blur_mul(img, img)) per channel.
+            let mu_all = self.context.alloc_buffer(
+                "s.mu",
+                (pixels * 3 * 4) as u64,
+                vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_SRC,
+                gpu_allocator::MemoryLocation::GpuToCpu,
+            )?;
+            let sq_all = self.context.alloc_buffer(
+                "s.sq",
+                (pixels * 3 * 4) as u64,
+                vk::BufferUsageFlags::STORAGE_BUFFER,
+                gpu_allocator::MemoryLocation::GpuOnly,
+            )?;
+            for c in 0..3u32 {
+                let off = c * pixels as u32;
+                self.blur.h5_into(&mut passes, img_all.clone(), tmp.clone(), w, h, w, off, 0);
+                self.blur.v5_into(&mut passes, tmp.clone(), mu_all.clone(), w, h, w, off);
+                self.blur.h5_mul_into(&mut passes, img_all.clone(), img_all.clone(), tmp.clone(), w, h, w, off, off, 0);
+                self.blur.v5_into(&mut passes, tmp.clone(), sq_all.clone(), w, h, w, off);
+            }
+
+            {
+
+            }
+
+            keep.push(ScaleKeep {
+                width: w,
+                height: h,
+                channels: 3,
+                img: img_all,
+                mu: mu_all,
+                sq: sq_all,
+            });
             current = img.downsample();
         }
 
-        Ok(GpuSsimImage { scales })
+        dispatch_sequence(&self.context, &passes)?;
+
+
+        Ok(GpuSsimImage {
+            scales: keep
+                .into_iter()
+                .map(|k| ScaleData {
+                    width: k.width,
+                    height: k.height,
+                    channels: k.channels,
+                    img: k.img,
+                    mu: k.mu,
+                    sq_blur: k.sq,
+                })
+                .collect(),
+        })
     }
 
     /// Gray (1-channel) variant: linear-light f32 planes, matching
-    /// `GBitmap::to_lab` (the ×1.16 branch).
+    /// `GBitmap::to_lab` (the x1.16 branch). One GPU submit for all scales.
     pub fn create_image_gray(&self, src: &ImgVec<f32>) -> Result<GpuSsimImage> {
-        let mut scales: Vec<ScaleData> = Vec::new();
+        let mut passes: Vec<Pass> = Vec::new();
+        
+        let mut keep: Vec<GrayKeep> = Vec::new();
         let mut current: Option<ImgVec<f32>> = Some(src.clone());
 
         for _ in 0..DEFAULT_WEIGHTS.len() {
@@ -102,108 +205,183 @@ impl GpuSsim {
                 None => break,
             };
             let (w, h) = (img.width(), img.height());
+            let pixels = w * h;
+
             let input: Vec<f32> = img.pixels().collect();
-            let planes = crate::color::rgba_to_lab_gpu(&self.context, &input, w, h, 1)?;
-            scales.push(self.make_scale(&planes, w, h, 1)?);
+            let staging = self.context.alloc_buffer(
+                "g.staging",
+                (input.len() * 4) as u64,
+                vk::BufferUsageFlags::TRANSFER_SRC,
+                gpu_allocator::MemoryLocation::CpuToGpu,
+            )?;
+            crate::transfer::write_mapped(&staging, &pack_f32(&input))?;
+            let gray_buf = self.context.alloc_buffer(
+                "g.gray",
+                (pixels * 4) as u64,
+                vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::STORAGE_BUFFER,
+                gpu_allocator::MemoryLocation::GpuOnly,
+            )?;
+            passes.push(Pass::CopyBuffer { src: staging.clone(), dst: gray_buf.clone() });
+
+            let lab = self.context.alloc_buffer(
+                "g.lab",
+                (pixels * 4) as u64,
+                vk::BufferUsageFlags::STORAGE_BUFFER,
+                gpu_allocator::MemoryLocation::GpuOnly,
+            )?;
+            self.color.lab_into(&mut passes, gray_buf.clone(), lab.clone(), w, h, 1);
+
+let mu = self.context.alloc_buffer(
+                "g.mu",
+                (pixels * 4) as u64,
+                vk::BufferUsageFlags::STORAGE_BUFFER,
+                gpu_allocator::MemoryLocation::GpuOnly,
+            )?;
+let sq = self.context.alloc_buffer(
+                "g.sq",
+                (pixels * 4) as u64,
+                vk::BufferUsageFlags::STORAGE_BUFFER,
+                gpu_allocator::MemoryLocation::GpuOnly,
+            )?;
+            let tmp = self.context.alloc_buffer(
+                "g.tmp",
+                (pixels * 4) as u64,
+                vk::BufferUsageFlags::STORAGE_BUFFER,
+                gpu_allocator::MemoryLocation::GpuOnly,
+            )?;
+            self.blur.h5_into(&mut passes, lab.clone(), tmp.clone(), w, h, w, 0, 0);
+            self.blur.v5_into(&mut passes, tmp.clone(), mu.clone(), w, h, w, 0);
+            self.blur.h5_mul_into(&mut passes, lab.clone(), lab.clone(), tmp.clone(), w, h, w, 0, 0, 0);
+            self.blur.v5_into(&mut passes, tmp.clone(), sq.clone(), w, h, w, 0);
+
+            keep.push(GrayKeep { width: w, height: h, img: lab, mu, sq });
             current = img.downsample();
         }
 
-        Ok(GpuSsimImage { scales })
-    }
+        dispatch_sequence(&self.context, &passes)?;
 
-    /// GPU statistics for one scale's Lab planes, replicating
-    /// `DssimChan::preprocess` (dssim.rs:118-139): chroma pre-blur in place
-    /// (luma untouched), then mu = blur(img), sq_blur = blur_mul(img, img).
-    fn make_scale(&self, planes: &[f32], w: usize, h: usize, channels: usize) -> Result<ScaleData> {
-        let pixels = w * h;
-        let mut img_all = Vec::with_capacity(pixels * channels);
-        let mut mu_all = Vec::with_capacity(pixels * channels);
-        let mut sq_all = Vec::with_capacity(pixels * channels);
-        for c in 0..channels {
-            let mut data = planes[c * pixels..(c + 1) * pixels].to_vec();
-            if c > 0 {
-                // Chroma pre-blur: the CPU mutates img in place via
-                // blur_in_place; blur() is arithmetically identical
-                // (blur.rs tests assert src2 == dst), so overwrite.
-                data = self.blur.blur(&data, w, h, w)?;
-            }
-            let mu = self.blur.blur(&data, w, h, w)?;
-            let sq = self.blur.blur_mul(&data, &data, w, h, w, w)?;
-            img_all.extend(data);
-            mu_all.extend(mu);
-            sq_all.extend(sq);
-        }
-        Ok(ScaleData {
-            width: w,
-            height: h,
-            channels,
-            img: img_all,
-            mu: mu_all,
-            sq_blur: sq_all,
+        Ok(GpuSsimImage {
+            scales: keep
+                .into_iter()
+                .map(|k| ScaleData {
+                    width: k.width,
+                    height: k.height,
+                    channels: 1,
+                    img: k.img,
+                    mu: k.mu,
+                    sq_blur: k.sq,
+                })
+                .collect(),
         })
     }
 
     /// Compare a reference image with a modified one; returns the final
-    /// DSSIM score. Mirrors `Dssim::compare` + `compare_inner`:
-    /// per scale, cross = blur_mul(ref.img, mod.img) on the preprocessed
-    /// planes, SSIM map on GPU, pooled here in f64 with the scale weights.
+    /// DSSIM score. ONE GPU submit for all scales: per scale, the three
+    /// channel cross-blurs and the SSIM combine run on the GPU-resident
+    /// planes; only the (tiny) SSIM maps come back for CPU pooling in f64.
     pub fn compare(&self, reference: &GpuSsimImage, modified: &GpuSsimImage) -> Result<f64> {
-        let mut ssim_sum = 0.0f64;
-        let mut weight_sum = 0.0f64;
+        let mut passes: Vec<Pass> = Vec::new();
 
-        for (n, (weight, (ref_scale, mod_scale))) in DEFAULT_WEIGHTS
+        let mut map_readbacks: Vec<(Buffer, usize, usize, usize)> = Vec::new(); // (rb, w, h, scale_n)
+
+        for (n, (ref_scale, mod_scale)) in reference
+            .scales
             .iter()
-            .zip(reference.scales.iter().zip(modified.scales.iter()))
+            .zip(modified.scales.iter())
             .enumerate()
         {
             let pixels = ref_scale.width * ref_scale.height;
             let channels = ref_scale.channels;
             assert_eq!(channels, mod_scale.channels, "channel count mismatch");
 
-            let mut cross_all = Vec::with_capacity(channels * pixels);
-            for c in 0..channels {
-                let cross = self.blur.blur_mul(
-                    &ref_scale.img[c * pixels..(c + 1) * pixels],
-                    &mod_scale.img[c * pixels..(c + 1) * pixels],
-                    ref_scale.width,
-                    ref_scale.height,
-                    ref_scale.width,
-                    mod_scale.width,
-                )?;
-                cross_all.extend(cross);
+            let tmp = self.context.alloc_buffer(
+                "c.tmp",
+                (pixels * 4) as u64,
+                vk::BufferUsageFlags::STORAGE_BUFFER,
+                gpu_allocator::MemoryLocation::GpuOnly,
+            )?;
+            let cross_all = self.context.alloc_buffer(
+                "c.cross",
+                (pixels * channels as usize * 4) as u64,
+                vk::BufferUsageFlags::STORAGE_BUFFER,
+                gpu_allocator::MemoryLocation::GpuOnly,
+            )?;
+
+            for c in 0..channels as u32 {
+                let off = c * pixels as u32;
+                self.blur.h5_mul_into(&mut passes, ref_scale.img.clone(), mod_scale.img.clone(), tmp.clone(), ref_scale.width, ref_scale.height, ref_scale.width, off, off, 0);
+                self.blur.v5_into(&mut passes, tmp.clone(), cross_all.clone(), ref_scale.width, ref_scale.height, ref_scale.width, off);
             }
 
-            let map = ssim_combine_pipelines(
-                &self.ssim,
-                &ref_scale.mu,
-                &ref_scale.sq_blur,
-                &mod_scale.mu,
-                &mod_scale.sq_blur,
-                &cross_all,
+            let map_dst = self.context.alloc_buffer(
+                "c.map",
+                (pixels * 4) as u64,
+                vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_SRC,
+                gpu_allocator::MemoryLocation::GpuOnly,
+            )?;
+            let map_rb = self.context.alloc_buffer(
+                "c.map_rb",
+                (pixels * 4) as u64,
+                vk::BufferUsageFlags::TRANSFER_DST,
+                gpu_allocator::MemoryLocation::GpuToCpu,
+            )?;
+            self.ssim.combine_into(
+                &mut passes,
+                ref_scale.mu.clone(),
+                ref_scale.sq_blur.clone(),
+                mod_scale.mu.clone(),
+                mod_scale.sq_blur.clone(),
+                cross_all.clone(),
+                map_dst.clone(),
                 ref_scale.width,
                 ref_scale.height,
                 channels,
-            )?;
+            );
 
-            let pooled = pool_scale(&map, ref_scale.width, ref_scale.height, n);
-            ssim_sum = pooled.mul_add(*weight, ssim_sum);
-            weight_sum += weight;
+            passes.push(Pass::CopyBuffer { src: map_dst.clone(), dst: map_rb.clone() });
+            map_readbacks.push((map_rb, ref_scale.width, ref_scale.height, n));
         }
+
+        dispatch_sequence(&self.context, &passes)?;
+
+        // Pool on CPU from the downloaded maps (order: scale n ascending —
+        // map_readbacks was built in scale order).
+        let mut ssim_sum = 0.0f64;
+        let mut weight_sum = 0.0f64;
+        for (rb, w, h, n) in &map_readbacks {
+            let map = crate::transfer::read_bytes(rb, w * h * 4)?;
+            let map: Vec<f32> = map
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|c| f32::from_le_bytes(*c))
+                .collect();
+                let pooled = pool_scale(&map, *w, *h, *n);
+                ssim_sum = pooled.mul_add(DEFAULT_WEIGHTS[*n], ssim_sum);
+            weight_sum += DEFAULT_WEIGHTS[*n];
+        }
+        
 
         Ok(to_dssim(ssim_sum / weight_sum))
     }
 }
 
-/// One pyramid scale of statistics for one image.
+fn pack_f32(data: &[f32]) -> Vec<u8> {
+    data.iter().flat_map(|v| v.to_le_bytes()).collect()
+}
+
+/// One pyramid scale of statistics for one image. All buffers hold
+/// `channels` concatenated planes (plane stride = width) and stay on the
+/// device between `create_image` and `compare`.
 struct ScaleData {
-    /// Preprocessed channel planes (post chroma pre-blur), tightly packed —
-    /// the CPU cross-blur reads exactly these (`DssimChan.img`).
-    img: Vec<f32>,
-    mu: Vec<f32>,
-    sq_blur: Vec<f32>,
     width: usize,
     height: usize,
     channels: usize,
+    /// Preprocessed channel planes (plane 0 = raw L, planes 1.. = chroma
+    /// pre-blur) — the cross-blur reads exactly these (`DssimChan.img`).
+    img: Buffer,
+    mu: Buffer,
+    sq_blur: Buffer,
 }
 
 /// A GPU-processed image — analog of `dssim_core::DssimImage`.
@@ -219,4 +397,24 @@ impl GpuSsimImage {
     pub fn height(&self) -> usize {
         self.scales[0].height
     }
+}
+
+
+/// Per-scale allocation keepers: staging/transient buffers must live until
+/// the submit completes (clones in `passes` keep them alive regardless).
+struct ScaleKeep {
+    width: usize,
+    height: usize,
+    channels: usize,
+    img: Buffer,
+    mu: Buffer,
+    sq: Buffer,
+}
+
+struct GrayKeep {
+    width: usize,
+    height: usize,
+    img: Buffer,
+    mu: Buffer,
+    sq: Buffer,
 }

@@ -140,9 +140,9 @@ impl ComputePipeline {
         count: u32,
         push_constants: &[u8],
     ) -> Result<()> {
-        let pass = Pass {
+        let pass = Pass::Compute {
             pipeline: self,
-            buffers: buffers.to_vec(),
+            buffers: buffers.iter().map(|b| (*b).clone()).collect(),
             push: push_constants.to_vec(),
             groups: count.div_ceil(64),
         };
@@ -152,7 +152,7 @@ impl ComputePipeline {
     /// Record one bound-and-dispatched pass into an open command buffer.
     /// The descriptor set is allocated from this pipeline's pool and freed
     /// by the pool reset in [`dispatch_sequence`].
-    fn record_pass(&self, cb: vk::CommandBuffer, buffers: &[&Buffer], push: &[u8], groups: u32) -> Result<()> {
+    fn record_pass(&self, cb: vk::CommandBuffer, buffers: &[Buffer], push: &[u8], groups: u32) -> Result<()> {
         assert_eq!(buffers.len() as u32, self.binding_count, "buffer count must match binding count");
         if push.len() as u32 > self.push_constant_size {
             return Err(Error::Shader("push constant overflow".into()));
@@ -207,17 +207,25 @@ impl ComputePipeline {
     }
 }
 
-/// One pipeline pass inside a [`dispatch_sequence`].
-pub struct Pass<'a> {
-    pub pipeline: &'a ComputePipeline,
-    pub buffers: Vec<&'a Buffer>,
-    pub push: Vec<u8>,
-    pub groups: u32,
+/// One step inside a [`dispatch_sequence`]: either a compute dispatch or a
+/// device-to-device buffer copy (e.g. staging upload, result readback).
+pub enum Pass<'a> {
+    Compute {
+        pipeline: &'a ComputePipeline,
+        buffers: Vec<Buffer>,
+        push: Vec<u8>,
+        groups: u32,
+    },
+    CopyBuffer {
+        src: Buffer,
+        dst: Buffer,
+    },
 }
 
 /// Record all passes into ONE command buffer (barriers between passes keep
 /// writes visible to the next pass), submit, and wait for the fence.
-/// Determinism-over-speed: no overlap, no pipelining.
+/// Determinism-over-speed: no overlap, no pipelining. Many passes per submit
+/// is the point — one fence wait amortizes the whole sequence.
 pub fn dispatch_sequence(context: &Arc<Context>, passes: &[Pass<'_>]) -> Result<()> {
     struct ResetPool<'a>(&'a ComputePipeline);
     let mut used_pipelines: Vec<ResetPool<'_>> = Vec::new();
@@ -225,19 +233,35 @@ pub fn dispatch_sequence(context: &Arc<Context>, passes: &[Pass<'_>]) -> Result<
     context.submit_one_shot(|cb| unsafe {
         let device = &context.device;
         for pass in passes {
-            if !used_pipelines.iter().any(|ResetPool(p)| std::ptr::eq(*p, pass.pipeline)) {
-                used_pipelines.push(ResetPool(pass.pipeline));
+            // Over-barriered on purpose (correctness first): every buffer the
+            // pass touches becomes visible to every later consumer.
+            let involved: Vec<&Buffer> = match pass {
+                Pass::Compute { buffers, .. } => buffers.iter().collect(),
+                Pass::CopyBuffer { src, dst } => vec![src, dst],
+            };
+            match pass {
+                Pass::Compute { pipeline, buffers, push, groups } => {
+                    if !used_pipelines.iter().any(|ResetPool(p)| std::ptr::eq(*p, *pipeline)) {
+                        used_pipelines.push(ResetPool(pipeline));
+                    }
+                    pipeline.record_pass(cb, buffers, push, *groups)?;
+                }
+                Pass::CopyBuffer { src, dst } => {
+                    let region = vk::BufferCopy {
+                        src_offset: 0,
+                        dst_offset: 0,
+                        size: src.size.min(dst.size),
+                    };
+                    device.cmd_copy_buffer(cb, src.buffer, dst.buffer, std::slice::from_ref(&region));
+                }
             }
-            pass.pipeline.record_pass(cb, &pass.buffers, &pass.push, pass.groups)?;
-            // Shader writes -> later reads (next pass / transfer / HOST).
-            let barriers: Vec<vk::BufferMemoryBarrier<'_>> = pass
-                .buffers
+            let barriers: Vec<vk::BufferMemoryBarrier<'_>> = involved
                 .iter()
                 .map(|b| {
                     buffer_barrier(
                         b.buffer,
                         b.size,
-                        vk::AccessFlags::SHADER_WRITE,
+                        vk::AccessFlags::SHADER_WRITE | vk::AccessFlags::TRANSFER_WRITE,
                         vk::AccessFlags::SHADER_READ
                             | vk::AccessFlags::TRANSFER_READ
                             | vk::AccessFlags::HOST_READ,
@@ -246,7 +270,8 @@ pub fn dispatch_sequence(context: &Arc<Context>, passes: &[Pass<'_>]) -> Result<
                 .collect();
             device.cmd_pipeline_barrier(
                 cb,
-                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::PipelineStageFlags::COMPUTE_SHADER
+                    | vk::PipelineStageFlags::TRANSFER,
                 vk::PipelineStageFlags::COMPUTE_SHADER
                     | vk::PipelineStageFlags::TRANSFER
                     | vk::PipelineStageFlags::HOST,

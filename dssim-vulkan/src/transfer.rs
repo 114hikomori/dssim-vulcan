@@ -11,21 +11,39 @@ use gpu_allocator::MemoryLocation;
 use crate::context::Context;
 use crate::{Error, Result};
 
-/// A Vulkan buffer with its backing allocation. Freed on drop.
+/// A Vulkan buffer with its backing allocation. Freed on drop. Cloneable:
+/// `Arc`-shared inner state means clones alias the same GPU memory (needed
+/// so pipeline `Pass` records can own buffers that outlive local scopes).
+#[derive(Clone)]
 pub struct Buffer {
+    inner: Arc<BufferInner>,
+}
+
+pub struct BufferInner {
     context: Arc<Context>,
-    pub(crate) buffer: vk::Buffer,
-    pub(crate) allocation: Option<Allocation>,
+    pub buffer: vk::Buffer,
+    pub allocation: Option<Allocation>,
     pub size: u64,
+}
+
+impl std::ops::Deref for Buffer {
+    type Target = BufferInner;
+    fn deref(&self) -> &BufferInner {
+        &self.inner
+    }
 }
 
 impl Buffer {
     pub fn buffer(&self) -> vk::Buffer {
-        self.buffer
+        self.inner.buffer
+    }
+
+    pub fn size(&self) -> u64 {
+        self.inner.size
     }
 }
 
-impl Drop for Buffer {
+impl Drop for BufferInner {
     fn drop(&mut self) {
         unsafe {
             if let Some(allocation) = self.allocation.take() {
@@ -87,10 +105,12 @@ impl Context {
 
             self.name_object(buffer, name);
             Ok(Buffer {
-                context: self.clone(),
-                buffer,
-                allocation: Some(allocation),
-                size,
+                inner: Arc::new(BufferInner {
+                    context: self.clone(),
+                    buffer,
+                    allocation: Some(allocation),
+                    size,
+                }),
             })
         }
     }

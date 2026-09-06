@@ -12,6 +12,7 @@ use ash::vk;
 
 use crate::context::Context;
 use crate::pipeline::{dispatch_sequence, ComputePipeline, Pass};
+use crate::transfer::Buffer;
 use crate::Result;
 
 /// Push constant block for rgba_to_lab.comp (112 bytes). Field names mirror
@@ -70,14 +71,7 @@ pub fn rgba_to_lab_gpu(
     let expected = if channels == 3 { pixels * 4 } else { pixels };
     assert_eq!(in_rgba.len(), expected, "input size mismatch");
 
-    let pipeline = ComputePipeline::new(
-        context,
-        "rgba_to_lab",
-        include_bytes!("../shaders/rgba_to_lab.comp.spv"),
-        2,
-        112,
-    )?;
-    let constants = dssim_core::tolab::LAB_GPU_CONSTANTS;
+    let pipelines = ColorPipelines::new(context)?;
 
     let src = context.upload_buffer("lab.src", &pack(in_rgba), vk::BufferUsageFlags::STORAGE_BUFFER)?;
     let dst = context.alloc_buffer(
@@ -87,13 +81,9 @@ pub fn rgba_to_lab_gpu(
         gpu_allocator::MemoryLocation::GpuOnly,
     )?;
 
-    let pass = Pass {
-        pipeline: &pipeline,
-        buffers: vec![&src, &dst],
-        push: pc_bytes(width, height, channels, &constants),
-        groups: (pixels as u32).div_ceil(64),
-    };
-    dispatch_sequence(context, &[pass])?;
+    let mut passes: Vec<Pass> = Vec::new();
+    pipelines.lab_into(&mut passes, src.clone(), dst.clone(), width, height, channels);
+    dispatch_sequence(context, &passes)?;
 
     let out_bytes = context.download_buffer(&dst)?;
     let mut out = Vec::with_capacity(pixels * channels);
@@ -101,4 +91,44 @@ pub fn rgba_to_lab_gpu(
         out.push(f32::from_le_bytes(*c));
     }
     Ok(out)
+}
+
+/// The rgba_to_lab pipeline, created once per GpuSsim and reused.
+pub struct ColorPipelines {
+    to_lab: ComputePipeline,
+}
+
+impl ColorPipelines {
+    pub fn new(context: &Arc<Context>) -> Result<Self> {
+        Ok(Self {
+            to_lab: ComputePipeline::new(
+                context,
+                "rgba_to_lab",
+                include_bytes!("../shaders/rgba_to_lab.comp.spv"),
+                2,
+                112,
+            )?,
+        })
+    }
+
+    /// Push the rgba_to_lab dispatch into a sequence: reads `src`
+    /// (interleaved RGBA, 4 floats/pixel, for 3ch; single plane for 1ch),
+    /// writes `dst` (channels planes, plane stride = width).
+    pub(crate) fn lab_into<'a>(
+        &'a self,
+        passes: &mut Vec<Pass<'a>>,
+        src: Buffer,
+        dst: Buffer,
+        width: usize,
+        height: usize,
+        channels: usize,
+    ) {
+            let pc = pc_bytes(width, height, channels, &dssim_core::tolab::LAB_GPU_CONSTANTS);
+        passes.push(Pass::Compute {
+            pipeline: &self.to_lab,
+            buffers: vec![src, dst],
+            push: pc,
+            groups: ((width * height) as u32).div_ceil(64),
+        });
+    }
 }

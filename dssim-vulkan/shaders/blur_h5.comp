@@ -36,8 +36,8 @@ void main() {
     uint y = idx / w;
     uint x = idx % w;
     uint last = w - 1u;
-    uint src_row = y * pc.dims.z;    // src_stride
-    uint dst_row = y * pc.dims2.x;   // dst_stride
+    uint src_row = y * pc.dims.z + pc.dims.w;    // src_stride + src plane offset (elems)
+    uint dst_row = y * pc.dims2.x + pc.dims2.y;   // dst_stride + dst plane offset (elems)
 
     // Reads used by the j=0 edge (also the tail of every other case's clamp).
     // Row must already be padded to at least 3 readable elements per the

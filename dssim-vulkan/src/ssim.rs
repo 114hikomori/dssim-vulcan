@@ -120,9 +120,9 @@ pub fn ssim_combine_pipelines(
         gpu_allocator::MemoryLocation::GpuOnly,
     )?;
 
-    let pass = Pass {
+    let pass = Pass::Compute {
         pipeline,
-        buffers: vec![&mu_o_buf, &mu_m_buf, &sq_o_buf, &sq_m_buf, &cross_buf, &dst],
+        buffers: vec![mu_o_buf.clone(), mu_m_buf.clone(), sq_o_buf.clone(), sq_m_buf.clone(), cross_buf.clone(), dst.clone()],
         push: pc_bytes(width, height),
         groups: (pixels as u32).div_ceil(64),
     };
@@ -155,4 +155,35 @@ pub fn ssim_combine_gpu(
     ssim_combine_pipelines(
         &pipelines, mu_o, sq_o, mu_m, sq_m, cross, width, height, num_channels,
     )
+}
+
+impl SsimPipelines {
+    /// Push the SSIM combine dispatch into a sequence (buffers already
+    /// GPU-resident; map lands in `dst`).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn combine_into<'a>(
+        &'a self,
+        passes: &mut Vec<Pass<'a>>,
+        mu_o: Buffer,
+        sq_o: Buffer,
+        mu_m: Buffer,
+        sq_m: Buffer,
+        cross: Buffer,
+        dst: Buffer,
+        width: usize,
+        height: usize,
+        num_channels: usize,
+    ) {
+        assert!(num_channels == 1 || num_channels == 3, "DSSIM uses 1 or 3 channels");
+        let pipeline = match num_channels {
+            3 => &self.combine3,
+            _ => &self.combine1,
+        };
+        passes.push(Pass::Compute {
+            pipeline,
+            buffers: vec![mu_o, mu_m, sq_o, sq_m, cross, dst],
+            push: pc_bytes(width, height),
+            groups: ((width * height) as u32).div_ceil(64),
+        });
+    }
 }

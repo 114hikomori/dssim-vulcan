@@ -42,9 +42,9 @@ void main() {
     uint y = idx / w;
     uint x = idx % w;
     uint last = w - 1u;
-    uint r1 = y * pc.dims.z;
-    uint r2 = y * pc.dims.w;
-    uint dst_row = y * pc.dims2.x;
+    uint r1 = y * pc.dims.z + pc.dims.w;
+    uint r2 = y * pc.dims2.y + pc.dims2.z;
+    uint dst_row = y * pc.dims2.x + pc.dims2.w;
 
     if (x == 0u) {
         float q0 = src1_data[r1 + 0u] * src2_data[r2 + 0u];

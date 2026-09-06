@@ -6,11 +6,12 @@
 //! cargo run -p dssim-vulkan --example bench --release
 //! ```
 //!
-//! Times the compare pipeline only (image construction excluded — decode
-//! cost is identical on both paths in real use). Serial, discrete GPU,
-//! warmup + a handful of timed iterations; no stress loops (TDR policy).
+//! Times the full score path — `create_image` (pyramid build) + `compare` —
+//! for both CPU and GPU, excluding only the synthetic image generation
+//! (decode cost is identical on both paths in real use). Serial, discrete
+//! GPU, warmup + a handful of timed iterations; no stress loops (TDR policy).
 
-use dssim_core::{Dssim, Downsample as _, ToLABBitmap as _};
+use dssim_core::Dssim;
 use dssim_vulkan::GpuSsim;
 use imgref::{Img, ImgVec};
 use std::sync::Arc;
@@ -113,7 +114,9 @@ fn main() {
         );
     }
 
-    eprintln!("\nNote: current GPU shape has per-call upload/download round trips and");
-    eprintln!("no batching — this table is the honest Phase-H baseline that the");
-    eprintln!("optimization work (GPU-resident pyramid, batching) will be measured against.");
+    eprintln!("\nNote: GPU path is now the optimized Phase-H shape — create_image");
+    eprintln!("uploads each pyramid once, compare runs one batched submit over");
+    eprintln!("GPU-resident planes (only the tiny SSIM maps come back to CPU).");
+    eprintln!("Ratio < 1.0 means GPU beats CPU; small images still pay fixed");
+    eprintln!("submit/setup overhead, so the win grows with image size.");
 }
