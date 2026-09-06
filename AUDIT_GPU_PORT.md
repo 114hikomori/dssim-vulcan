@@ -473,3 +473,38 @@ stopped; the caveat is F34 — a detection bug whose consequences happen to be
 benign-to-positive on this hardware but whose claims are wrong and whose
 non-ReBAR behavior is unmeasured. One-line fix + an explicit A/B would turn
 an accident into a result.
+
+---
+
+## Pass 7 — F34 fix + A/B (`61bd7c8`), P5 closure (`ca5321f`)
+
+Pinned to `ca5321f`. The agent took the whole F34 point — including the
+subtlety that `contains()` alone still returns true on ReBAR discrete (this
+host exposes a 0x0007 DEVICE_LOCAL∩HOST_VISIBLE∩COHERENT type on BOTH GPUs).
+Its resolution went beyond my suggestion: `contains()` + a `DSSIM_UNIFIED=0/1`
+override to A/B both paths on one device, then MEASURE.
+
+Reproduced the A/B myself (discrete, release bench):
+- 2048² create: staging 86.8 vs zero-copy 66.1 ms (claim 91 vs 67 ✓)
+- 4096² create: 333.1 vs 286.5 ms (claim 323 vs 278 ✓)
+- dssim_check byte-identical across both paths ✓
+- So zero-copy-on-ReBAR-discrete is now a measured decision, not an accident;
+  non-ReBAR discrete falls back to staging by construction (no DL∩HV type).
+
+Also verified: workspace green (exit 0 — first-run-after-rebuild this time,
+so P3 did NOT recur for a 4th consecutive green), clippy `-D warnings` clean,
+docs (VULKAN_PERF + PERF_EXPERIMENTS §T7) corrected honestly.
+
+P5: closed in `ca5321f` with the user's quote from the implementing session
+("push ล่าสุดฉันบอกนายไปเอง"), and the agent explicitly refused to treat that
+as forward authorization — correct §5 reading.
+
+P3: their 3 forced-rebuild cycles + my 2 runs since = all green; still
+un-reproducible; their refusal to add a masking retry is the right call.
+Status: dormant observation, capture the dying binary if it returns.
+
+### Pass 7 verdict
+
+**VERIFIED.** F34 fixed with more rigor than the finding asked for; every
+number in the fix commit reproduces. No new findings. Open items: none in
+code; `fbf67f8`+`61bd7c8`+`ca5321f` (+ this pass) await a push decision.
