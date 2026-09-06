@@ -102,16 +102,25 @@ impl ComputePipeline {
 
             device.destroy_shader_module(module, None);
 
-            // Enough sets for the dispatches this pipeline will do per pass;
-            // grows via a new pool if ever exceeded (Phase B: fixed 64).
+            // Fixed descriptor-pool cap, sized to the batch plan (F5). Each
+            // pass in a `dispatch_sequence` allocates one set from this
+            // pipeline's pool; the pool is reset after every submit, so the
+            // cap must cover the most a single sequence ever uses for one
+            // pipeline. Worst case is `create_image`'s `v5` usage: (2 chroma +
+            // channels mu + channels sq) per scale x scales = (2+3+3)*5 = 40
+            // for the 5-scale / 3-channel DSSIM plan. 128 gives 3x headroom
+            // for any realistic scale/channel growth. This is NOT dynamic:
+            // exceeding it fails `allocate_descriptor_sets` mid-sequence, so
+            // raise it together with any change to the batching plan.
+            const MAX_SETS_PER_POOL: u32 = 128;
             let pool_sizes = [vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::STORAGE_BUFFER,
-                descriptor_count: binding_count * 64,
+                descriptor_count: binding_count * MAX_SETS_PER_POOL,
             }];
             let descriptor_pool = device
                 .create_descriptor_pool(
                     &vk::DescriptorPoolCreateInfo::default()
-                        .max_sets(64)
+                        .max_sets(MAX_SETS_PER_POOL)
                         .pool_sizes(&pool_sizes),
                     None,
                 )
@@ -247,10 +256,17 @@ pub fn dispatch_sequence(context: &Arc<Context>, passes: &[Pass<'_>]) -> Result<
                     pipeline.record_pass(cb, buffers, push, *groups)?;
                 }
                 Pass::CopyBuffer { src, dst } => {
+                    // F32: every call site copies a whole buffer; a size
+                    // mismatch is a bug, not something to silently truncate.
+                    assert_eq!(
+                        src.size, dst.size,
+                        "CopyBuffer size mismatch ({} vs {}): would silently truncate",
+                        src.size, dst.size
+                    );
                     let region = vk::BufferCopy {
                         src_offset: 0,
                         dst_offset: 0,
-                        size: src.size.min(dst.size),
+                        size: src.size,
                     };
                     device.cmd_copy_buffer(cb, src.buffer, dst.buffer, std::slice::from_ref(&region));
                 }

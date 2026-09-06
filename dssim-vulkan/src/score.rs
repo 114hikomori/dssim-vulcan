@@ -108,23 +108,19 @@ impl GpuSsim {
             )?;
             passes.push(Pass::CopyBuffer { src: staging.clone(), dst: rgba_buf.clone() });
 
-            // Lab planes (3 planes in one buffer, plane stride = width).
-            let lab_all = self.context.alloc_buffer(
-                "s.lab",
-                (pixels * 3 * 4) as u64,
-                vk::BufferUsageFlags::STORAGE_BUFFER,
-                gpu_allocator::MemoryLocation::GpuOnly,
-            )?;
-            self.color.lab_into(&mut passes, rgba_buf.clone(), lab_all.clone(), w, h, 3);
-
-            // img_all: plane 0 = raw L (copy), planes 1,2 = chroma pre-blur.
+            // img_all: Lab planes written straight in by the shader (plane 0 =
+            // raw L, planes 1,2 = chroma, pre-blurred in place below); plane
+            // stride = width. There is deliberately no separate `lab` buffer
+            // and no lab->img copy: the old copy lacked TRANSFER_SRC/DST usage
+            // on both buffers (F25, a spec violation that only survived because
+            // validation was off). Writing plane 0 directly removes the copy.
             let img_all = self.context.alloc_buffer(
                 "s.img",
                 (pixels * 3 * 4) as u64,
                 vk::BufferUsageFlags::STORAGE_BUFFER,
                 gpu_allocator::MemoryLocation::GpuOnly,
             )?;
-            passes.push(Pass::CopyBuffer { src: lab_all.clone(), dst: img_all.clone() }); // plane 0 (offset 0..pixels)
+            self.color.lab_into(&mut passes, rgba_buf.clone(), img_all.clone(), w, h, 3);
             let tmp = self.context.alloc_buffer(
                 "s.tmp",
                 (pixels * 4) as u64,
@@ -133,16 +129,19 @@ impl GpuSsim {
             )?;
             for c in 1..3u32 {
                 let off = c * pixels as u32;
-                self.blur.h5_into(&mut passes, lab_all.clone(), tmp.clone(), w, h, w, off, 0);
-                self.blur.v5_into(&mut passes, tmp.clone(), img_all.clone(), w, h, w, off);
+                self.blur.h5_into(&mut passes, img_all.clone(), tmp.clone(), w, h, w, off, 0);
+                self.blur.v5_into(&mut passes, tmp.clone(), img_all.clone(), w, h, off);
             }
 
-            // mu (blur of img) and sq (blur_mul(img, img)) per channel.
+            // mu (blur of img) and sq (blur_mul(img, img)) per channel. Both
+            // stay device-local: `compare` reads them only on-device via the
+            // combine (F27 — mu was host-visible for no reason, wasting the
+            // scarce BAR-resident pool on dGPUs).
             let mu_all = self.context.alloc_buffer(
                 "s.mu",
                 (pixels * 3 * 4) as u64,
-                vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_SRC,
-                gpu_allocator::MemoryLocation::GpuToCpu,
+                vk::BufferUsageFlags::STORAGE_BUFFER,
+                gpu_allocator::MemoryLocation::GpuOnly,
             )?;
             let sq_all = self.context.alloc_buffer(
                 "s.sq",
@@ -153,13 +152,9 @@ impl GpuSsim {
             for c in 0..3u32 {
                 let off = c * pixels as u32;
                 self.blur.h5_into(&mut passes, img_all.clone(), tmp.clone(), w, h, w, off, 0);
-                self.blur.v5_into(&mut passes, tmp.clone(), mu_all.clone(), w, h, w, off);
+                self.blur.v5_into(&mut passes, tmp.clone(), mu_all.clone(), w, h, off);
                 self.blur.h5_mul_into(&mut passes, img_all.clone(), img_all.clone(), tmp.clone(), w, h, w, off, off, 0);
-                self.blur.v5_into(&mut passes, tmp.clone(), sq_all.clone(), w, h, w, off);
-            }
-
-            {
-
+                self.blur.v5_into(&mut passes, tmp.clone(), sq_all.clone(), w, h, off);
             }
 
             keep.push(ScaleKeep {
@@ -196,7 +191,7 @@ impl GpuSsim {
     pub fn create_image_gray(&self, src: &ImgVec<f32>) -> Result<GpuSsimImage> {
         let mut passes: Vec<Pass> = Vec::new();
         
-        let mut keep: Vec<GrayKeep> = Vec::new();
+        let mut keep: Vec<ScaleKeep> = Vec::new();
         let mut current: Option<ImgVec<f32>> = Some(src.clone());
 
         for _ in 0..DEFAULT_WEIGHTS.len() {
@@ -231,13 +226,13 @@ impl GpuSsim {
             )?;
             self.color.lab_into(&mut passes, gray_buf.clone(), lab.clone(), w, h, 1);
 
-let mu = self.context.alloc_buffer(
+            let mu = self.context.alloc_buffer(
                 "g.mu",
                 (pixels * 4) as u64,
                 vk::BufferUsageFlags::STORAGE_BUFFER,
                 gpu_allocator::MemoryLocation::GpuOnly,
             )?;
-let sq = self.context.alloc_buffer(
+            let sq = self.context.alloc_buffer(
                 "g.sq",
                 (pixels * 4) as u64,
                 vk::BufferUsageFlags::STORAGE_BUFFER,
@@ -250,11 +245,11 @@ let sq = self.context.alloc_buffer(
                 gpu_allocator::MemoryLocation::GpuOnly,
             )?;
             self.blur.h5_into(&mut passes, lab.clone(), tmp.clone(), w, h, w, 0, 0);
-            self.blur.v5_into(&mut passes, tmp.clone(), mu.clone(), w, h, w, 0);
+            self.blur.v5_into(&mut passes, tmp.clone(), mu.clone(), w, h, 0);
             self.blur.h5_mul_into(&mut passes, lab.clone(), lab.clone(), tmp.clone(), w, h, w, 0, 0, 0);
-            self.blur.v5_into(&mut passes, tmp.clone(), sq.clone(), w, h, w, 0);
+            self.blur.v5_into(&mut passes, tmp.clone(), sq.clone(), w, h, 0);
 
-            keep.push(GrayKeep { width: w, height: h, img: lab, mu, sq });
+            keep.push(ScaleKeep { width: w, height: h, channels: 1, img: lab, mu, sq });
             current = img.downsample();
         }
 
@@ -266,7 +261,7 @@ let sq = self.context.alloc_buffer(
                 .map(|k| ScaleData {
                     width: k.width,
                     height: k.height,
-                    channels: 1,
+                    channels: k.channels,
                     img: k.img,
                     mu: k.mu,
                     sq_blur: k.sq,
@@ -278,7 +273,10 @@ let sq = self.context.alloc_buffer(
     /// Compare a reference image with a modified one; returns the final
     /// DSSIM score. ONE GPU submit for all scales: per scale, the three
     /// channel cross-blurs and the SSIM combine run on the GPU-resident
-    /// planes; only the (tiny) SSIM maps come back for CPU pooling in f64.
+    /// planes; only the per-scale SSIM maps come back for CPU pooling in f64.
+    /// Note the scale-0 map is full-resolution (≈16 MB at 2048²; ≈4/3·P0·4B
+    /// summed over scales), so this is not a negligible transfer — pooling on
+    /// the GPU is a standing non-goal (AGENTS.md §8) pending profiling.
     pub fn compare(&self, reference: &GpuSsimImage, modified: &GpuSsimImage) -> Result<f64> {
         let mut passes: Vec<Pass> = Vec::new();
 
@@ -293,6 +291,15 @@ let sq = self.context.alloc_buffer(
             let pixels = ref_scale.width * ref_scale.height;
             let channels = ref_scale.channels;
             assert_eq!(channels, mod_scale.channels, "channel count mismatch");
+            // F29: the cross-blur (`h5_mul_into`) derives src2's stride from
+            // src1's, so a ref/mod shape mismatch reads out of bounds on the
+            // GPU instead of the old CPU slice panic. The CLI guards sizes
+            // upstream, but this is a public library API — assert here too.
+            assert_eq!(
+                (ref_scale.width, ref_scale.height),
+                (mod_scale.width, mod_scale.height),
+                "reference and modified scales must have matching dimensions"
+            );
 
             let tmp = self.context.alloc_buffer(
                 "c.tmp",
@@ -302,7 +309,7 @@ let sq = self.context.alloc_buffer(
             )?;
             let cross_all = self.context.alloc_buffer(
                 "c.cross",
-                (pixels * channels as usize * 4) as u64,
+                (pixels * channels * 4) as u64,
                 vk::BufferUsageFlags::STORAGE_BUFFER,
                 gpu_allocator::MemoryLocation::GpuOnly,
             )?;
@@ -310,7 +317,7 @@ let sq = self.context.alloc_buffer(
             for c in 0..channels as u32 {
                 let off = c * pixels as u32;
                 self.blur.h5_mul_into(&mut passes, ref_scale.img.clone(), mod_scale.img.clone(), tmp.clone(), ref_scale.width, ref_scale.height, ref_scale.width, off, off, 0);
-                self.blur.v5_into(&mut passes, tmp.clone(), cross_all.clone(), ref_scale.width, ref_scale.height, ref_scale.width, off);
+                self.blur.v5_into(&mut passes, tmp.clone(), cross_all.clone(), ref_scale.width, ref_scale.height, off);
             }
 
             let map_dst = self.context.alloc_buffer(
@@ -400,20 +407,14 @@ impl GpuSsimImage {
 }
 
 
-/// Per-scale allocation keepers: staging/transient buffers must live until
-/// the submit completes (clones in `passes` keep them alive regardless).
+/// Per-scale allocation keepers for both the RGB and gray paths (F30: these
+/// were two near-identical structs; `channels` is 1 for gray). Staging and
+/// transient buffers are dropped at each scale's scope end — the clones held
+/// in `passes` keep the GPU memory alive until the submit completes.
 struct ScaleKeep {
     width: usize,
     height: usize,
     channels: usize,
-    img: Buffer,
-    mu: Buffer,
-    sq: Buffer,
-}
-
-struct GrayKeep {
-    width: usize,
-    height: usize,
     img: Buffer,
     mu: Buffer,
     sq: Buffer,

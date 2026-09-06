@@ -85,6 +85,19 @@ impl Context {
                 .collect();
             let validation_enabled =
                 want_validation && instance_layers.iter().any(|l| l.as_c_str() == VALIDATION_LAYER);
+            // F26: make the validation state explicit so a silent skip (layer
+            // present on disk but not registered / VK_LAYER_PATH unset) is
+            // visible instead of quietly weakening every "GPU-validated" claim.
+            if cfg!(debug_assertions) {
+                if validation_enabled {
+                    eprintln!("[dssim-vulkan] validation layer: ENABLED");
+                } else if want_validation {
+                    eprintln!(
+                        "[dssim-vulkan] validation layer: WANTED but NOT FOUND \
+                         (set VK_LAYER_PATH to the SDK's Bin dir to enable it)"
+                    );
+                }
+            }
 
             let instance_extensions = entry
                 .enumerate_instance_extension_properties(None)

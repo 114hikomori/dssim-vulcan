@@ -16,30 +16,22 @@ use crate::Result;
 
 /// Push constant block shared by the three blur shaders (56 bytes):
 /// uvec4 dims / uvec4 dims2 / vec4 k1 / vec2 k2 (std430-style packing).
+/// Field meanings are per-shader; the two builders below are the single
+/// source of truth (F33: an earlier shared `pc_bytes` let the non-mul h5
+/// shader read `dims.w` as `src_off` while the builder named it
+/// `src2_stride` — one wrong argument from silent corruption).
 #[repr(C)]
 #[derive(Copy, Clone)]
 struct BlurPC {
-    dims: [u32; 4],   // width, height, src_stride, src2_stride
-    dims2: [u32; 4],  // dst_stride, 0, 0, 0
+    // h5/v5: width, height, src_stride, src_off | h5_mul: ..., src1_stride, src1_off
+    dims: [u32; 4],
+    // h5/v5: dst_stride, dst_off, 0, 0 | h5_mul: dst_stride, src2_stride, src2_off, dst_off
+    dims2: [u32; 4],
     k1: [f32; 4],     // K5_OUTER, K5_INNER, K5_MID, K5_EDGE_CENTER
     k2: [f32; 2],     // K5_EDGE_NEAR, K5_EDGE_FAR
 }
 
 const _: () = assert!(std::mem::size_of::<BlurPC>() == 56);
-
-fn pc_bytes(width: usize, height: usize, src_stride: usize, src2_stride: usize, dst_stride: usize, k5_ref: &[f32; 6]) -> Vec<u8> {
-    let pc = BlurPC {
-        dims: [width as u32, height as u32, src_stride as u32, src2_stride as u32],
-        dims2: [dst_stride as u32, 0, 0, 0],
-        k1: [k5_ref[0], k5_ref[1], k5_ref[2], k5_ref[3]],
-        k2: [k5_ref[4], k5_ref[5]],
-    };
-    // repr(C) pod of plain f32/u32 — no padding, safe to view as bytes.
-    unsafe {
-        std::slice::from_raw_parts(&pc as *const BlurPC as *const u8, std::mem::size_of::<BlurPC>())
-    }
-    .to_vec()
-}
 
 /// The three blur pipelines, created once per [`GpuSsim`](crate::GpuSsim) and
 /// reused across every scale and image (pipeline creation is expensive;
@@ -63,6 +55,9 @@ impl BlurPipelines {
 
     /// Push a single H5 pass into a sequence (plane-offset aware): reads
     /// plane `src_off` of `src`, writes plane `dst_off` of `dst`.
+    // The parameter list mirrors the shader's push-constant fields one-for-one;
+    // grouping them would obscure that mapping, which is the whole point here.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn h5_into<'a>(
         &'a self,
         passes: &mut Vec<Pass<'a>>,
@@ -83,7 +78,9 @@ impl BlurPipelines {
         });
     }
 
-    /// Push a single V5 pass into a sequence (tight src/dst + plane offsets).
+    /// Push a single V5 pass into a sequence. The source (`tmp`) is always a
+    /// tight single plane (stride == width), so no stride parameter is taken
+    /// (F33: an earlier dead `_stride` param implied a stride could differ).
     pub(crate) fn v5_into<'a>(
         &'a self,
         passes: &mut Vec<Pass<'a>>,
@@ -91,7 +88,6 @@ impl BlurPipelines {
         dst: Buffer,
         width: usize,
         height: usize,
-        _stride: usize,
         dst_off: u32,
     ) {
         let k5_ref = dssim_core::blur::K5_REF;
@@ -155,13 +151,13 @@ impl BlurPipelines {
         let h_pass = Pass::Compute {
             pipeline: &self.h5,
             buffers: vec![src.clone(), tmp.clone()],
-            push: pc_bytes(width, height, stride, 0, width, &k5_ref),
+            push: pc_bytes_off(width, height, stride, 0, width, 0, &k5_ref),
             groups: pixels.div_ceil(64),
         };
         let v_pass = Pass::Compute {
             pipeline: &self.v5,
             buffers: vec![tmp.clone(), dst.clone()],
-            push: pc_bytes(width, height, width, 0, width, &k5_ref),
+            push: pc_bytes_off(width, height, width, 0, width, 0, &k5_ref),
             groups: pixels.div_ceil(64),
         };
         dispatch_sequence(&self.context, &[h_pass, v_pass])?;
@@ -214,7 +210,7 @@ impl BlurPipelines {
         let v_pass = Pass::Compute {
             pipeline: &self.v5,
             buffers: vec![tmp.clone(), dst.clone()],
-            push: pc_bytes(width, height, width, 0, width, &k5_ref),
+            push: pc_bytes_off(width, height, width, 0, width, 0, &k5_ref),
             groups: pixels.div_ceil(64),
         };
         dispatch_sequence(&self.context, &[h_pass, v_pass])?;
