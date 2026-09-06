@@ -98,3 +98,30 @@ Consequences for the track order:
   track, not T5.
 - Recording/descriptor cost (T3/T10) is a small constant (the ~7 ms `disp` plus
   part of `prep`), so it matters at small sizes, not large.
+
+## Round 2 (post-M10): T9-lite → diagnostic → T7
+
+**T9-lite** (VkQueryPool GPU-busy timing, opt-in) reframed the plan: at 2048²
+`create_image` is ~91 ms wall but only ~5 ms GPU-busy. So the compute tracks
+(**T5** 2D-dispatch/workgroup, **T6a** fuse h5+h5_mul) target ~5% of the time —
+both refuted as low-value, exactly as T5's premise was.
+
+**Diagnostic** (permanent `#[ignore]`'d `upload_diag`): the upload cost is NOT
+first-touch page faults (first-write == warm-write) and NOT the memory type (the
+same loop into a cached `Vec` was *slower* than the WC mapped write — WC
+streaming absorbs it). It was the **per-pixel `PixelsIter` loop**, which is a
+disguised memcpy (`RGBAPLU` is `repr(C) [f32;4]`). Fixed: `to_contiguous_buf →
+copy_from_slice`. 4K create 421→338 ms (~20%), 2048² ~6%.
+
+**T7** (UMA zero-copy): on unified-memory devices (DEVICE_LOCAL∩HOST_VISIBLE —
+integrated Radeon, llvmpipe/CI) `create_image` writes the shader's source buffer
+directly, dropping the staging buffer and the `staging→device` `CopyBuffer`.
+Discrete keeps the staging path. Detection is a memory-property scan (not
+`device_type`, since llvmpipe reports as CPU). Parity + validation clean on both
+paths.
+
+**Where the time is now** (discrete, 2048²): create ≈ CPU downsample (~10 ms, a
+non-goal to move) + WC transfer (~24 ms/64 MB, hardware floor) + recording.
+GPU-busy ~5 ms. The remaining levers (T10 barrier-tighten, T11 merge the two
+creates, T3 descriptor pre-alloc) are CPU-side micro-overhead with modest,
+noise-limited gains — diminishing returns against the transfer/prep floor.

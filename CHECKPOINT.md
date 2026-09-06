@@ -568,3 +568,36 @@ Milestone ids refer to `dssim-vulkan-fable-plan.md` §16 (also listed in `AGENTS
 - Blocked / open question: none.
 - Next: M0-M10 all now have explicit sign-off entries. Optional: push the
   session's unpushed commits; tag a release only on explicit instruction.
+
+## 2026-09-06 — Phase H round 2: T9-lite + diagnostic + T7 (perf tracks)
+- User opened a perf round from PERF_EXPERIMENTS_PHASE_H.md §8 re-prioritization
+  (T9-lite → T5 → T7 → T6a → T10 → T11 → T3 → T6b; skip T4/T8).
+- T9-lite (8c40165): opt-in VkQueryPool GPU-busy timing per submit (Context
+  query pool + timestampPeriod; dispatch_sequence brackets only when enabled;
+  bench create_gpu/compare_gpu columns). Immediately REFUTED the plan's #2: at
+  2048² create is 91.6 ms wall but 4.8 ms GPU-busy -> T5 (compute) is ~2% of
+  wall. Bottleneck is CPU-side upload, not compute.
+- Diagnostic (e561e9f): permanent #[ignore]'d upload_diag test. First-touch page
+  faults REFUTED (first-write 24ms == warm 24ms; cached-Vec loop 33ms SLOWER than
+  WC mapped -> WC streaming absorbs the loop, ring/T2 not the cure). Real cause:
+  the interleave was a per-pixel PixelsIter, but RGBAPLU is repr(C) [f32;4] so
+  it is a disguised memcpy -> replaced with to_contiguous_buf + copy_from_slice
+  (RGB byte-copy size-guarded; gray direct &[f32] copy). 4K create 421->338ms,
+  2048² ~6%. Parity green (catches any layout error).
+- T7 (4bbe731): UMA zero-copy. is_unified_memory (DEVICE_LOCAL∩HOST_VISIBLE
+  memory-type scan, not device_type so llvmpipe counts) -> create_image writes
+  the shader's source buffer directly, no staging + no staging->device copy.
+  Discrete path unchanged. Parity + validation clean on BOTH GPUs (integrated
+  exercises zero-copy).
+- T5 + T6a: refuted by measurement (GPU-busy ~5ms of ~87ms create) -- not done.
+- Verified each step: full workspace green WITH validation + --nocapture (0 vulkan
+  errors, 15 suites), clippy --no-deps -D warnings clean.
+- Deviated from plan: yes -- the plan's #2 (T5) was refuted by T9-lite (its own
+  stated purpose), and the reviewer's page-fault/ring hypothesis was refuted by
+  the diagnostic; pivoted to the real cause (loop->memcpy) and T7.
+- Blocked / open question: none. Remaining tracks (T10 barrier-tighten, T11
+  merge-creates, T3 descriptor pre-alloc) are CPU-side micro-overhead with
+  modest, noise-limited gains vs the WC-transfer + CPU-downsample floor.
+- Next: user decision -- continue T11/T10/T3 (diminishing) or stop; then push
+  the round-2 commits (8c40165,e561e9f,4bbe731 + docs) and watch CI (T7 zero-copy
+  path runs on llvmpipe = unified, so CI exercises it).
