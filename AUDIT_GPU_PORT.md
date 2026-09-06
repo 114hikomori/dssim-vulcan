@@ -385,3 +385,32 @@ confirmed authorized by the user; P3 downgraded to a one-off transient
 (collision hypothesis refuted). Remaining: the pre-existing open question
 from `c4ee8d4` — M10 sign-off on the integrated GPU + CI lavapipe leg with
 the optimized path (CI run #8 pending per `878de7a`).
+
+---
+
+## Pass 5 — upload fix (`e561e9f`) + my page-fault hypothesis: REFUTED by their data
+
+Pinned to `e561e9f`. The implementing agent ran a permanent `#[ignore]`d
+diagnostic (transfer.rs `upload_diag`) BEFORE fixing — and it refuted my
+pass-4 guess (first-touch page faults): fresh-write 23.98 ms ≈ warm-write
+23.13 ms for 64 MB, and the same loop into cached RAM was SLOWER (32.8 ms).
+The cost was the per-pixel scalar loop, not memory behavior. I was wrong;
+their experiment was right and is reproducible (re-ran: numbers match).
+
+Fix verified:
+- Load-bearing claim checked at source: `RGBAPLU = RGBA<f32>` = `rgb` crate
+  `#[repr(C)] Rgba { r, g, b, a }` — field order + repr(C) + compile-time
+  `size_of == 16` assert make the memcpy byte-identical to the old loop.
+- Workspace green (10 suites, 0 failed, 0 ignored); dssim_check byte-identical
+  to all prior runs (parity preserved); clippy `-D warnings` clean.
+- Bench reproduced: 4096² create 421→358 ms (~15%, their claim 20% — noise
+  band); 2048² 91.6→90.5 (their honest "~6%, near noise").
+
+Residual (mine, for the next pass): after the fix, 2048² create is still
+90.5 wall vs 5.1 GPU-busy. The remaining ~68 ms ≈ 89 MB pyramid upload at
+~2.7 GB/s WC-memcpy bandwidth — now near the hardware floor for f32-precision
+parity (u8 upload would be 4x faster but breaks the 2e-6 map tolerance by
+construction). Real levers left: T7 on UMA (write lands in final memory,
+no staging copy) or accepting the floor on discrete. Also: `e561e9f` has no
+CHECKPOINT entry — commit message carries the record; acceptable for a
+mid-phase fix, but the next milestone-level change should log one.
