@@ -70,6 +70,15 @@ pub struct Context {
     pub(crate) perf_query_pool: vk::QueryPool,
     pub(crate) timing_enabled: std::sync::atomic::AtomicBool,
     pub(crate) perf_gpu_ns: std::sync::atomic::AtomicU64,
+    /// BH2: device limits that bound a single dispatch and a single storage
+    /// buffer. Vulkan guarantees only 65535 workgroups per axis (4,194,240 px at
+    /// 64 threads) and a 65536-byte storage range, so a >=2048^2 dispatch or a
+    /// large full-res buffer EXCEEDS the spec floor -- UB on a minimum-
+    /// conforming driver (AMD/NVIDIA/llvmpipe report far higher, which is why no
+    /// local run or CI fixture hits it). Queried at creation; enforced in
+    /// `record_pass` and offered via `supports_size` for CPU fallback.
+    pub(crate) max_compute_work_group_count_x: u32,
+    pub(crate) max_storage_buffer_range: u64,
     /// Must be the LAST field: dropping `Entry` unloads the Vulkan library,
     /// and every other field's teardown calls into it first.
     #[allow(dead_code)] // read implicitly: must outlive all other fields' Drop
@@ -293,6 +302,9 @@ impl Context {
             // T9-lite: GPU timestamp period + a 2-query pool (start/end) reused
             // per timed submit (reads are synchronous after the fence).
             let timestamp_period_ns = props.limits.timestamp_period;
+            // BH2: per-axis workgroup-count and storage-buffer-range limits.
+            let max_compute_work_group_count_x = props.limits.max_compute_work_group_count[0];
+            let max_storage_buffer_range = props.limits.max_storage_buffer_range as u64;
             let perf_query_pool = device
                 .create_query_pool(
                     &vk::QueryPoolCreateInfo::default()
@@ -351,6 +363,8 @@ impl Context {
                 perf_query_pool,
                 timing_enabled: std::sync::atomic::AtomicBool::new(false),
                 perf_gpu_ns: std::sync::atomic::AtomicU64::new(0),
+                max_compute_work_group_count_x,
+                max_storage_buffer_range,
             })
         }
     }
@@ -368,6 +382,20 @@ impl Context {
     /// into the shader's source buffer instead of staging + CopyBuffer.
     pub fn is_unified_memory(&self) -> bool {
         self.is_unified_memory
+    }
+
+    /// BH2: whether this device's limits can handle a `w`x`h` image on the GPU
+    /// path. The largest single dispatch is the full-res one (`ceil(w*h/64)`
+    /// groups); the largest single storage buffer is the full-res interleaved
+    /// RGBA source (`w*h*16` bytes). If either exceeds the device limit, the
+    /// caller should fall back to CPU rather than mis-execute on a minimum-
+    /// conforming driver. `record_pass` enforces the same limits defensively.
+    pub fn supports_size(&self, w: usize, h: usize) -> bool {
+        let pixels = (w as u64) * (h as u64);
+        let groups = pixels.div_ceil(64);
+        let max_buffer = pixels.saturating_mul(16);
+        groups <= self.max_compute_work_group_count_x as u64
+            && max_buffer <= self.max_storage_buffer_range
     }
 
     /// Bytes currently in live `Buffer` allocations (F28 measurement).

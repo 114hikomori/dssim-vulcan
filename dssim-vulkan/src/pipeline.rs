@@ -189,6 +189,24 @@ impl ComputePipeline {
         if !push.len().is_multiple_of(4) {
             return Err(Error::Shader("record_pass: push size not a multiple of 4".into()));
         }
+        // BH2: never dispatch past the per-axis workgroup limit or bind a
+        // storage buffer past maxStorageBufferRange -- both are UB on a
+        // minimum-conforming driver and validation stays silent. The CLI
+        // pre-checks via Context::supports_size; this guards library callers.
+        if groups > self.context.max_compute_work_group_count_x {
+            return Err(Error::Shader(format!(
+                "record_pass: dispatch groups {groups} exceeds maxComputeWorkGroupCount[0] {}",
+                self.context.max_compute_work_group_count_x
+            )));
+        }
+        for b in buffers {
+            if b.size > self.context.max_storage_buffer_range {
+                return Err(Error::Shader(format!(
+                    "record_pass: storage buffer {} bytes exceeds maxStorageBufferRange {}",
+                    b.size, self.context.max_storage_buffer_range
+                )));
+            }
+        }
         unsafe {
             let device = &self.context.device;
 

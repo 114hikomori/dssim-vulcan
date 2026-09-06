@@ -167,10 +167,15 @@ fn run_gpu(map_output_file: Option<&String>, files: &[String]) -> Result<(), Box
     // asserts this line is present (not merely that the fallback note is
     // absent) so the check cannot silently rot if the fallback wording changes.
     let device_name = context.device_name().to_owned();
-    let gpu = gpu_backend::GpuSsim::new(context)?;
+    // BH2: keep a clone of the context so the scope below can call
+    // `supports_size` (GpuSsim::new otherwise consumes the Arc).
+    let gpu = gpu_backend::GpuSsim::new(context.clone())?;
     eprintln!("dssim: gpu device: {device_name}");
     type GpuErr = Box<dyn std::error::Error + Send + Sync>;
 
+    // BH2: set inside the scope when the device limits can't handle the size;
+    // Cell is fine because only the main thread (the result closure) touches it.
+    let gpu_limits_exceeded = std::cell::Cell::new(false);
     let (images_send, mut images_recv) = ordered_channel::bounded(2);
     let (filenames_send, filenames_recv) = crossbeam_channel::unbounded();
     let scope_result: Result<(), GpuErr> = std::thread::scope(|scope| -> Result<(), GpuErr> {
@@ -195,6 +200,14 @@ fn run_gpu(map_output_file: Option<&String>, files: &[String]) -> Result<(), Box
                 .try_for_each(move |f| filenames_send.send(f))?;
 
             let (file1, original) = images_recv.next().ok_or("Can't load any images")?;
+            // BH2: if this device's limits can't handle the image size, stop the
+            // GPU path cleanly and let the caller fall back to CPU (matching the
+            // "--gpu ... falls back to CPU if unavailable" contract) rather than
+            // mis-execute on a minimum-conforming driver.
+            if !context.supports_size(original.width(), original.height()) {
+                gpu_limits_exceeded.set(true);
+                return Ok(());
+            }
             let original_gpu = gpu.create_image(&original)?;
 
             for (file2, modified) in images_recv {
@@ -221,6 +234,13 @@ fn run_gpu(map_output_file: Option<&String>, files: &[String]) -> Result<(), Box
         }
         result
     });
+    // BH2: the GPU path bailed out because the device limits can't handle the
+    // size -- fall back to CPU (run_cpu_simple reloads the files) rather than
+    // exit 1, honoring the "--gpu falls back if unavailable" contract.
+    if gpu_limits_exceeded.get() {
+        eprintln!("note: --gpu device limits can't handle this image size; falling back to CPU");
+        return run_cpu_simple(files);
+    }
     scope_result.map_err(|e| -> Box<dyn std::error::Error> { e })
 }
 
