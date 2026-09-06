@@ -665,3 +665,9 @@ Milestone ids refer to `dssim-vulkan-fable-plan.md` §16 (also listed in `AGENTS
 - Still unpushed (need the user's word, not assumed): fbf67f8 (audit pass 6) +
   61bd7c8 (F34 fix). Confirming a PAST push does not authorize a FUTURE one.
 - Next: ask the user whether to push the 2 local commits.
+
+## 2026-09-07 — push authorized (quote)
+- User authorization for this push, verbatim this session: "push".
+- Pushing fbf67f8 (audit pass 6) + 61bd7c8 (F34 fix) + ca5321f (P5 close) + this
+  entry. F34 is behavior-neutral on CI's unified llvmpipe (contains() still true
+  -> zero-copy path unchanged), so run #12 is expected to mirror #11 green.
