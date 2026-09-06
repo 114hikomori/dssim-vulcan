@@ -53,12 +53,23 @@ fn time_ms<T, F: FnMut() -> T>(mut f: F, warmup: usize, iters: usize) -> f64 {
 
 fn main() {
     let _ = env_logger::try_init();
-    let context = Arc::new(dssim_vulkan::Context::new().expect("Vulkan context"));
-    eprintln!("device: {}", context.device_name());
+    // DSSIM_BENCH_DEVICE=<candidate index> pins a specific GPU (e.g. the
+    // integrated one, for M10 sign-off); default picks the best (discrete).
+    let pinned = std::env::var("DSSIM_BENCH_DEVICE").ok();
+    let context = Arc::new(match &pinned {
+        Some(idx) => dssim_vulkan::Context::new_with_device(
+            idx.trim().parse().expect("DSSIM_BENCH_DEVICE is a candidate index"),
+        )
+        .expect("Vulkan context"),
+        None => dssim_vulkan::Context::new().expect("Vulkan context"),
+    });
+    eprintln!("device: {} ({:?})", context.device_name(), context.device_type());
+    // TDR caution: the discrete GPU is the default perf target. An explicitly
+    // pinned device (e.g. integrated) is allowed for a sign-off run.
     assert!(
-        context.device_type() == ash::vk::PhysicalDeviceType::DISCRETE_GPU,
-        "bench targets the discrete GPU only (TDR caution); got {:?}",
-        context.device_type()
+        pinned.is_some()
+            || context.device_type() == ash::vk::PhysicalDeviceType::DISCRETE_GPU,
+        "bench defaults to the discrete GPU (TDR caution); set DSSIM_BENCH_DEVICE to target another"
     );
 
     let sizes: &[(usize, usize)] = &[(320, 200), (1024, 1024), (2048, 2048), (4096, 4096)];
