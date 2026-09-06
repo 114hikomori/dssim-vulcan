@@ -36,15 +36,17 @@ jobs:
       # F21: the debug build enables the Khronos validation layer when present
       # (now installed above), and context.rs prints its state. Fail the job if
       # any validation error surfaces -- previously "validation clean" was never
-      # actually tested in CI (the layer was absent).
+      # actually tested in CI (the layer was absent). --nocapture is REQUIRED:
+      # cargo test captures a passing test's stderr, which would swallow the
+      # messenger's "[vulkan ERROR]" lines and make the grep gate vacuous.
       - name: Test (validation-enabled; fail on any Vulkan validation error)
         run: |
           set -o pipefail
-          cargo test --workspace 2>&1 | tee test.log
+          cargo test --workspace -- --nocapture 2>&1 | tee test.log
           if grep -qE "\[vulkan ERROR\]|VUID-" test.log; then
             echo "::error::Vulkan validation errors detected in CI:"
             grep -E "\[vulkan ERROR\]|VUID-" test.log | head -40
             exit 1
           fi
           echo "validation layer state:"
-          grep -m1 "validation layer:" test.log || true
+          grep -m1 "validation layer:" test.log || echo "  (no validation-layer line found -- layer may be absent)"
