@@ -339,3 +339,26 @@ honest value rankings above, and the two cheap-risk winners (T5, T7) plus the
 free fusion sub-idea (mu/sq shared-read) are the ones to do if a next
 performance phase is opened. If none is opened, the M10 sign-off stands as
 is; this table is the record of what was knowingly left on the table.
+
+### Pass-4 addendum (same day): T9-lite landed and REFUTES this section's #2
+
+`8c40165` added VkQueryPool GPU-busy timing (opt-in, tests untouched —
+implementation reviewed). Reproduced on RX 6600M: 2048² create = 93.4 ms wall
+but only 5.0 ms GPU-busy; 4096² = 344/21.4. GPU compute is ~5% of create wall.
+
+Consequences, as measured:
+- **T5 demoted to near-zero** (my #2 ranking above is retracted — it was
+  inferred from wall-time attribution; the timestamps refute it. This is
+  exactly why T9-lite was ranked #1.)
+- **The bottleneck is host-side `prep`** (~70–90 ms at 2048² ≈ 1 GB/s for
+  ~89 MB of pyramid uploads). The interleave loop itself is already optimal
+  shape (single mapped slice, f32 components, sequential), so the anomaly is
+  memory behavior: first-touch page faults on fresh staging allocations, WC
+  vs cached mapping, or allocator churn — a diagnostic, not a rewrite,
+  localizes it. If it's page faults/allocation churn, T2's staging ring
+  (rejected earlier "without measurement") becomes justified by measurement.
+- T7 (UMA zero-copy) remains valid and orthogonal for integrated/CI.
+- Caveat: the CPU-phase probe that produced the prep/downsample/fence split
+  was transient (not committed); the attribution survives arithmetic
+  (wall − GPU − downsample − fence ≈ prep) but a committed seam would be
+  better science.
