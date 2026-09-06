@@ -297,3 +297,40 @@ Milestone ids refer to `dssim-vulkan-fable-plan.md` §16 (also listed in `AGENTS
   once per image), batched per-channel dispatches, async readback; then re-run
   bench.rs and update the measured table. Target re-set after profiling per plan
   (the >=5x-with-batching target was provisional).
+
+## 2026-09-06 — M10 (Phase H optimization landed; GPU beats CPU at medium/large sizes)
+- Done: GpuSsim refactored to GPU-resident per-scale planes + ONE batched
+  submit in compare (cross-blurs -> combine -> map readback); only the tiny
+  SSIM maps return for CPU f64 pooling. Infrastructure: `Pass::CopyBuffer`
+  (device-to-device), `Buffer` now `Arc`-cloneable (Deref to BufferInner) so
+  pass records own buffers past local scopes, blur shaders gained plane-offset
+  push constants (src_off/dst_off). Verified by full workspace green on RX
+  6600M: blur parity (9), phase_e locked values + CPU-reference parity,
+  gray/RGB size matrix. Every committed .spv re-verified == fresh
+  `glslc --target-env=vulkan1.3 -O` recompile (all shaders, hash match).
+- Bugs found & fixed during verification (both from the refactor):
+  (1) compare's `h5_mul_into` wrote `tmp` at the plane offset while `v5_into`
+  always reads `tmp` from offset 0 -> out-of-bounds write (tmp is 1 plane) and
+  cross planes 1,2 held stale channel-0 data -> RGB dssim = 2^52-1 garbage.
+  Fixed to dst_off=0, matching create_image. TWINS: audited every h5_mul_into
+  call site; create_image already used dst_off=0, only compare was wrong.
+  (2) `blur_mul` wrapper still built push constants with the pre-offset
+  `pc_bytes` layout after the h5_mul shader moved src2_stride into dims2 ->
+  blur_mul parity broke (max_abs 3e-1 at row boundaries). Switched to
+  `pc_mul_bytes` with zero offsets. TWINS: audited all pc_bytes callers; the
+  non-mul blur wrapper's pc_bytes use is still correct (offsets read as 0).
+  (3) A split-experiment leftover orphaned the combine in an undispatched
+  `passes2` vec (combine never ran -> map readback uninitialized); merged back
+  into the single `passes` sequence.
+- Measured (bench.rs, RX 6600M, full create_image+compare path): GPU/CPU ratio
+  0.82 (1024^2), 0.93 (2048^2), 1.14 (320x200) — down from the 4.2-15.3x-slower
+  Phase-H baseline (commit 1dabf06). M10 met for medium/large images; small
+  images still lose to fixed submit/setup overhead.
+- Deviated from plan: none material. Removed dead `ColorPipelines.context`
+  field (unused after lab_into stopped self-dispatching).
+- Blocked / open question: none.
+- Next: M10 is met at >=1024px but not at 320x200. Decide whether to chase the
+  small-image overhead (persistent command buffers / fewer barriers) or accept
+  it and move to M8 (CLI --gpu already wired; confirm fallback + CI cover the
+  optimized path) and M9 sign-off. Also: run the optimized path on the
+  integrated GPU + CI lavapipe before calling M10 fully shipped.
