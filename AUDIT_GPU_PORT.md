@@ -1,8 +1,12 @@
-# Audit — M7 + M9 (Phase H first slice)
+# Audit — GPU port (rolling)
+
+## Pass 1 — M7 + M9 (Phase H first slice)
 
 Date: 2026-09-06. Auditor: opencode (fable-judge style review, read-only).
 Pinned to HEAD `acf9fca` (commits `1dabf06`, `0b29845`, `de10c0e`, `acf9fca` and the
 cumulative state through M6). **No code was changed.** This file only records findings.
+Findings F1–F24 belong to this pass. Pass 2 (below) audits the Phase H optimization
+(`815eab8` + `c4ee8d4`) and continues the numbering from F25.
 
 Scope note: at audit time the working tree contained an *in-progress, uncommitted*
 Phase H optimization refactor by the implementing agent (`blur.rs`, `color.rs`,
@@ -196,3 +200,106 @@ follow-up, not a defect.
   independently re-verified.
 - Findings F1, F5, F13 are the ones most likely to bite the in-flight Phase H
   optimization work; worth resolving in that phase's next commit.
+
+---
+
+## Pass 2 — Phase H optimization (`815eab8` + `c4ee8d4`, M10 claim)
+
+Date: 2026-09-06 (same day, later). Pinned to HEAD `c4ee8d4`. Read-only; no code
+changed. Claims re-observed, not trusted:
+
+| Claim | Reproduced? |
+|---|---|
+| full workspace green on RX 6600M | YES — `cargo test --workspace` all suites pass, 0 ignored, no silent skips |
+| every committed .spv == fresh `glslc --target-env=vulkan1.3 -O` | YES — 7/7 SHA256 match |
+| `h5_mul_into` dst_off=0 at every call site (bug-1 fix) | YES — 3/3 sites |
+| ratios 0.82 / 0.93 / 1.14 | PARTIAL — re-run gave 0.76 / 0.95 / 1.03 (noise band); load-bearing conclusion (GPU wins ≥1024px, loses small) holds |
+| no test weakening | YES — diff touches no test file, no tolerance; one new *stricter* assert |
+
+### Findings
+
+**F25 (high, spec violation — latent) — `lab_all`→`img_all` CopyBuffer without transfer usage flags.**
+`score.rs` `create_image` (RGB): `s.lab` and `s.img` are allocated `STORAGE_BUFFER`
+only, then used as `Pass::CopyBuffer` src/dst. `vkCmdCopyBuffer` requires
+`TRANSFER_SRC`/`TRANSFER_DST` (VUID-vkCmdCopyBuffer-srcBuffer-00118/-00120) —
+undefined behavior per spec. It runs today only because validation layers are
+silently absent on this machine (F26) and the AMD driver is permissive. A strict
+driver or a validation-enabled CI leg would fail. Cheapest real fix: have
+`lab_into` write plane 0 (L) directly into `img_all` at dst_off=0 — the whole
+copy exists only to seed plane 0, so it disappears along with the violation.
+
+**F26 (medium, process) — "verified on GPU" runs without validation and nobody knows.**
+`context.rs:78-87` enables validation only `if installed`; on this machine the
+Khronos layer exists at `C:\VulkanSDK\1.4.357.0\Bin\VkLayer_khronos_validation.json`
+but is not registered (implicit-layer registry has only Steam overlay) and
+`VK_LAYER_PATH` is unset → `validation_enabled = false` with zero output. Every
+"GPU-validated" claim so far (including F25's survival) is validation-less.
+Recommend: `eprintln!` the validation state at Context creation in debug builds,
+and set `VK_LAYER_PATH` in the CI validation leg (ties to F21).
+
+**F27 (medium, memory) — `mu_all` allocated host-visible but never read back.**
+`s.mu` uses `GpuToCpu` + `TRANSFER_SRC`; `compare` consumes it only on-device
+(`combine_into`), and the gray path correctly uses `GpuOnly`. Host-visible VRAM
+is the scarce, BAR-resized pool on dGPUs — up to ~48MB/scale wasted at 2048².
+Switch to `GpuOnly` (keep `TRANSFER_SRC` only if something later reads it).
+
+**F28 (medium, memory) — peak-VRAM regression from the single-submit design.**
+All scales' buffers — including per-scale transients (`staging`, `rgba`, `lab`,
+`tmp`) — are allocated before the one `dispatch_sequence` and kept alive by
+`passes` until it returns: ≈84 B/px summed over scales ≈ 470MB at 2048²,
+≈1.9GB at 4096² (iGPU shares system RAM). The old per-scale code freed
+transients immediately. Options: one max-size transient arena reused across
+scales via plane offsets, or split into a few submits (still amortizes far
+better than per-scale).
+**F29 (medium, latent API trap) — `h5_mul_into` uses `stride1` for both sources; `compare` doesn't assert equal dimensions.**
+`blur.rs` `h5_mul_into` builds `pc_mul_bytes(..., stride1, src1_off, stride1, src2_off, ...)`
+— src2's stride is hardcoded to stride1. The deleted CPU path passed
+`stride2 = mod_scale.width` explicitly. `compare` asserts only channel equality
+(`score.rs`), so a ref/mod size mismatch (library misuse; the CLI guards it —
+`gpu_cli` size-mismatch test) now reads out of bounds on the GPU instead of the
+old CPU slice panic. Add `assert_eq!(ref_scale.width, mod_scale.width)` (+height)
+in `compare`, or thread a real stride2.
+
+**F30 (low, debris) — refactor leftovers.**
+`score.rs:161-163` empty block `{ }` (the `passes2`-merge scar); no trailing
+newline at EOF in `score.rs` and `color.rs`; column-0 `let mu`/`let sq` at
+`score.rs:234,240`; over-indented `let pc` at `color.rs:216`; `ScaleKeep` and
+`GrayKeep` are the same struct minus `channels` (collapse to one). Note:
+`cargo fmt --check` passes vacuously — `.rustfmt.toml` `disable_all_formatting=true`
+is upstream Kornel policy (`73933cd`, pre-port), already logged as F22; these
+lines are debris relative to the file's own style, not a fmt-gate failure.
+
+**F31 (low, claim accuracy) — "only the (tiny) SSIM maps come back".**
+Scale-0's map is full-resolution: 16MB at 2048², ≈22MB total per compare
+(4/3·P0·4B). "Tiny" fits the pooled maps of the old design's imagination, not
+this one. The CPU-side pooling itself is correct per the standing non-goal
+(AGENTS.md §8 — no GPU-side pooling without profiling justification); just fix
+the wording in `score.rs` doc-comments and the bench note.
+
+**F32 (low, robustness) — `CopyBuffer` silently truncates on size mismatch.**
+`pipeline.rs`: `size: src.size.min(dst.size)`. Every current call site is
+equal-sized; a future mismatch becomes a silent partial copy. Prefer
+`assert_eq!(src.size, dst.size)` (or an explicit size field on the variant).
+
+**F33 (info, fragility) — push-constant layout aliasing.**
+`v5_into` takes `_stride` and ignores it (src must be tight — true for all
+callers today, undocumented). `pc_bytes`'s `src2_stride` argument is read as
+`src_off` by the non-mul h5 shader — safe only because callers pass 0 (the
+checkpoint's twin-audit note). Both are one wrong-argument away from a
+silent-corruption bug of exactly the class fixed as bug-2. Recommend: delete
+`v5_into`'s dead param and migrate `blur()`/`blur_mul()` wrappers onto
+`pc_bytes_off`/`pc_mul_bytes` so each field has one meaning per shader.
+
+### Pass 2 verdict
+
+The optimization is real and honestly reported (all load-bearing claims
+reproduced; the three self-found bugs show genuine verification happened).
+F25 is the one to fix before any validation-enabled CI leg exists; F26 is why
+F25 survived review. F27/F28 are the price of the single-submit design and are
+worth paying down before pushing to 4K sizes.
+
+### Caveats of this pass
+
+- Bench numbers are single-run on a warm laptop GPU; ±10% noise, direction stable.
+- F25's "would fail on strict drivers" is spec-based inference, not observed —
+  no validation-enabled run exists on this machine to demonstrate it.
