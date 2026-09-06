@@ -106,7 +106,12 @@ void main() {
     // Vulkan permits FDiv up to 2.5 ulp; the CPU's division is correctly
     // rounded. For the identity case (identical images) numerator and
     // denominator are bitwise equal and the exact quotient is 1.0, which the
-    // identity test locks to exact — so select it instead of dividing.
+    // identity test locks to exact -- so select it instead of dividing.
+    // BH32: for NON-FINITE planes (Inf/Inf) the CPU's plain division yields NaN
+    // (-> a huge finite dssim after pooling) while this select yields 1.0. That
+    // case is unreachable for finite inputs (denom > 0 is proven: c1,c2 > 0 and
+    // the squared terms are non-negative), so only a corrupted upload could
+    // trigger it. Documented divergence, not a live bug.
     precise float result = (numer == denom) ? 1.0 : numer / denom;
     dst_data[dst_row + x] = result;
 }

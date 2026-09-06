@@ -46,6 +46,16 @@ pub struct Context {
     /// All compute-capable devices found at creation, best first.
     pub device_candidates: Vec<String>,
     pub(crate) device: ash::Device,
+    /// BH5: Context/GpuSsim are `Sync` (all fields are), so `Arc<Context>`
+    /// crosses threads and `&self` submit methods invite concurrent use -- yet
+    /// the submit path shares `command_pool`, the queue, every pipeline's
+    /// descriptor pool, and the 2-query `perf_query_pool`. This mutex serializes
+    /// all GPU submits so concurrent callers are correct (serialized), not
+    /// silently corrupt. Held for the whole of `dispatch_sequence` (so
+    /// descriptor-set alloc + submit + pool-reset are atomic) and around the
+    /// `upload_buffer`/`download_buffer` submits. Uncontended cost is ~ns vs the
+    /// ms-scale fence wait, so it's free in practice.
+    submit_lock: Mutex<()>,
     /// Needed for multi-queue sync decisions (Phase E).
     #[allow(dead_code)]
     pub(crate) queue_family_index: u32,
@@ -380,6 +390,7 @@ impl Context {
                 queue_family_index,
                 queue,
                 command_pool,
+                submit_lock: Mutex::new(()),
                 allocator: Mutex::new(Some(allocator)),
                 live_bytes: std::sync::atomic::AtomicUsize::new(0),
                 peak_bytes: std::sync::atomic::AtomicUsize::new(0),
@@ -399,6 +410,21 @@ impl Context {
 
     pub fn device_type(&self) -> vk::PhysicalDeviceType {
         self.device_type
+    }
+
+    /// BH5: serialize all GPU submits (see `submit_lock`). Poison-tolerant like
+    /// `create_lock`: a panic under the lock must not brick every later submit.
+    pub(crate) fn lock_submit(&self) -> MutexGuard<'_, ()> {
+        self.submit_lock.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// BH29: take the allocator lock, surviving poisoning. The old code used
+    /// `.expect("allocator mutex poisoned")`, so a panic under the lock made
+    /// every later `Buffer` drop panic (abort risk) and `Context::drop`'s
+    /// `if let Ok` then SKIPPED allocator teardown -- destroying the device with
+    /// live allocations. `into_inner` keeps the allocator usable in all cases.
+    pub(crate) fn lock_allocator(&self) -> MutexGuard<'_, Option<Allocator>> {
+        self.allocator.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// T7/F34: whether a memory type is both DEVICE_LOCAL and HOST_VISIBLE
@@ -474,6 +500,11 @@ impl Context {
     /// Record a one-shot command buffer on the compute queue and wait for it.
     /// `record` may fail (e.g. descriptor allocation); the error aborts the
     /// partially-recorded buffer and is returned.
+    ///
+    /// BH5: the caller MUST already hold `submit_lock` (dispatch_sequence,
+    /// upload_buffer, and download_buffer all do). This primitive does not lock
+    /// itself -- dispatch_sequence holds the lock across alloc+submit+reset, so
+    /// locking here too would self-deadlock.
     pub(crate) fn submit_one_shot(
         &self,
         record: impl FnOnce(vk::CommandBuffer) -> Result<(), Error>,
@@ -553,11 +584,11 @@ impl Drop for Context {
             let _ = self.device.device_wait_idle();
             self.device.destroy_command_pool(self.command_pool, None);
             self.device.destroy_query_pool(self.perf_query_pool, None);
-            // Drop the allocator while the device is still valid: its Drop
-            // frees any remaining memory blocks through vkFreeMemory.
-            if let Ok(mut guard) = self.allocator.lock() {
-                drop(guard.take());
-            }
+            // BH29: poison-tolerant -- always tear down the allocator (its Drop
+            // frees remaining memory blocks through the device), even if a prior
+            // panic poisoned the lock. The old `if let Ok` skipped teardown on
+            // poison, destroying the device with live allocations.
+            drop(self.lock_allocator().take());
             if let (Some(loader), Some(messenger)) = (&self.debug_instance_loader, self.debug_messenger) {
                 loader.destroy_debug_utils_messenger(messenger, None);
             }

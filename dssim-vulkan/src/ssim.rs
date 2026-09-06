@@ -33,6 +33,12 @@ fn pc_bytes(width: usize, height: usize) -> Vec<u8> {
     let pc = SsimPC {
         dims: [width as u32, height as u32, 0, 0],
         dims2: [width as u32, 0, 0, 0],
+        // BH31: these duplicate dssim-core's SSIM constants (dssim.rs:405-407:
+        // c1=0.01^2, c2=0.03^2, inv3=1/3), which are local `let`s, not `pub`.
+        // Verified equal today; the parity suites (phase_e, ssim_parity) catch
+        // drift if a CPU-side change moves the score past 5e-6. A full fix (a
+        // `pub` constant in dssim-core, or extending the LAB_GPU_CONSTANTS push
+        // channel to carry these) is deferred -- see AUDIT_DEEP_BUGHUNT BH31.
         k: [0.01 * 0.01, 0.03 * 0.03, 1.0 / 3.0, 0.0],
     };
     // repr(C) pod of plain f32/u32 — no padding, safe to view as bytes.

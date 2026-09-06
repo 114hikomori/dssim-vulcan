@@ -66,7 +66,8 @@ void main() {
     // The two designated fma sites, matching dssim.rs:431-432.
     precise float numer = fma(2.0, mu1_mu2, c1) * fma(2.0, sigma12, c2);
     precise float denom = (mu1_sq + mu2_sq + c1) * (sigma1_sq + sigma2_sq + c2);
-    // Exact-quotient select for the identity case — see ssim_combine_3ch.
+    // Exact-quotient select for the identity case -- see ssim_combine_3ch for
+    // the full rationale incl. the BH32 non-finite divergence note.
     precise float result = (numer == denom) ? 1.0 : numer / denom;
     dst_data[dst_row + x] = result;
 }

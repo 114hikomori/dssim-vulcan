@@ -42,7 +42,11 @@ layout(push_constant) uniform PC {
 // (NoContraction on the in/out edges comes from the `precise` locals at the
 // call sites; the fma() calls are explicit CPU mul_add transcriptions.)
 float cbrt_poly(float x) {
-    // poly[2].mul_add(x, poly[1]).mul_add(x, poly[0]) with poly = [0.2, 1.51, -0.5]
+    // poly[2].mul_add(x, poly[1]).mul_add(x, poly[0]) with poly = [0.2, 1.51,
+    // -0.5]. BH31: this cbrt seed + the Halley refinement below duplicate
+    // dssim-core/src/linear.rs's cbrt; verified equal today, and the Lab parity
+    // suite (lab_parity) catches drift. Full push-constant migration deferred
+    // (see AUDIT_DEEP_BUGHUNT BH31).
     precise float y = fma(x, -0.5, 1.51);
     y = fma(x, y, 0.2);
 

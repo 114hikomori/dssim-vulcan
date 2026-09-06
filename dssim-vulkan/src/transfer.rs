@@ -51,7 +51,7 @@ impl Drop for BufferInner {
                 self.context
                     .live_bytes
                     .fetch_sub(self.size as usize, std::sync::atomic::Ordering::Relaxed);
-                let mut allocator = self.context.allocator.lock().expect("allocator mutex poisoned");
+                let mut allocator = self.context.lock_allocator();
                 let _ = allocator
                     .as_mut()
                     .expect("allocator not yet dropped")
@@ -83,7 +83,7 @@ impl Context {
             let requirements = self.device.get_buffer_memory_requirements(buffer);
 
             let allocation = {
-                let mut allocator = self.allocator.lock().expect("allocator mutex poisoned");
+                let mut allocator = self.lock_allocator();
                 allocator
                     .as_mut()
                     .expect("allocator not yet dropped")
@@ -108,7 +108,7 @@ impl Context {
             if let Err(e) =
                 self.device.bind_buffer_memory(buffer, allocation.memory(), allocation.offset())
             {
-                let mut allocator = self.allocator.lock().expect("allocator mutex poisoned");
+                let mut allocator = self.lock_allocator();
                 let _ = allocator
                     .as_mut()
                     .expect("allocator not yet dropped")
@@ -144,6 +144,9 @@ impl Context {
         data: &[u8],
         usage: vk::BufferUsageFlags,
     ) -> Result<Buffer> {
+        // BH5: serialize this submit against other GPU work (submit_one_shot
+        // shares the command pool + queue).
+        let _submit = self.lock_submit();
         let staging = self.alloc_buffer(
             &format!("{name}.staging"),
             data.len() as u64,
@@ -191,6 +194,8 @@ impl Context {
 
     /// Copy a device-local buffer back to the host and return its contents.
     pub fn download_buffer(self: &std::sync::Arc<Self>, src: &Buffer) -> Result<Vec<u8>> {
+        // BH5: serialize this submit against other GPU work.
+        let _submit = self.lock_submit();
         let readback = self.alloc_buffer(
             "readback",
             src.size,

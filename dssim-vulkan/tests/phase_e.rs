@@ -416,3 +416,38 @@ fn phase_e_tiny_rgb_end_to_end() {
         }
     }
 }
+
+
+/// BH5: prove the submit_lock makes concurrent `&self` use correct. Four threads
+/// share one GpuSsim (Arc<Context> is Sync) and each runs create_image_pair +
+/// compare on its own copy of the pair; every result must match the CPU
+/// reference. Without the lock they would race on the shared command pool /
+/// descriptor pools / perf query pool and corrupt.
+#[test]
+fn phase_e_concurrent_submits_are_serialized() {
+    let _gpu = gpu_lock();
+    let context = Arc::new(Context::new().expect("context"));
+    let gpu = Arc::new(GpuSsim::new(context).unwrap());
+    let img1 = decode_rgba("../tests/test1-sm.png");
+    let img2 = decode_rgba("../tests/test2-sm.png");
+    let cpu = cpu_score(&img1, &img2);
+
+    let results: Vec<f64> = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let gpu = gpu.clone();
+                let a = img1.clone();
+                let b = img2.clone();
+                s.spawn(move || {
+                    let (r, m) = gpu.create_image_pair(&a, &b).unwrap();
+                    gpu.compare(&r, &m).unwrap()
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().expect("submit thread")).collect()
+    });
+    assert_eq!(results.len(), 4);
+    for (i, score) in results.iter().enumerate() {
+        assert_parity(&format!("concurrent submit {i}"), *score, cpu);
+    }
+}

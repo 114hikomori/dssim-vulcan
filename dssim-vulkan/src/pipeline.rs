@@ -277,6 +277,13 @@ pub enum Pass<'a> {
 /// Determinism-over-speed: no overlap, no pipelining. Many passes per submit
 /// is the point — one fence wait amortizes the whole sequence.
 pub fn dispatch_sequence(context: &Arc<Context>, passes: &[Pass<'_>]) -> Result<()> {
+    // BH5: serialize the whole sequence (descriptor-set alloc during record +
+    // submit + pool-reset on drop) against every other submit, so concurrent
+    // `&self` callers are correct rather than silently corrupting the shared
+    // command pool / queue / descriptor pools / perf query pool. Declared BEFORE
+    // `reset` so it drops AFTER it (reverse order) -- the pool reset runs under
+    // the lock.
+    let _submit = context.lock_submit();
     // BH1: recycle each used pipeline's descriptor pool on EVERY exit path. A
     // mid-sequence failure (record_pass Err, submit error, timing-read error)
     // previously returned before the reset loop, leaking the sets allocated so
