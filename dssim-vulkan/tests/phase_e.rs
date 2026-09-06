@@ -315,3 +315,61 @@ fn phase_e_create_pair_matches_separate_and_cpu() {
         assert_parity("pair-vs-cpu", paired, cpu);
     }
 }
+
+
+/// BH16: the F29 channel-count assert in `compare` (score.rs) is a public-API
+/// guard against GPU out-of-bounds (the cross-blur derives src2 stride from
+/// src1). The CLI checks sizes upstream, so nothing else drives a mismatch
+/// through `compare` -- a refactor deleting the assert would silently
+/// reintroduce the hazard. Pin it with a should_panic.
+#[test]
+#[should_panic(expected = "channel count mismatch")]
+fn phase_e_compare_panics_on_channel_mismatch() {
+    let _gpu = gpu_lock();
+    let context = Arc::new(Context::new().expect("context"));
+    let gpu = GpuSsim::new(context).unwrap();
+    let rgb = gpu.create_image(&synth_rgba(64, 64, 0x1111_2222)).unwrap();
+    let gray = gpu.create_image_gray(&synth_gray(64, 64, 0x3333_4444)).unwrap();
+    let _ = gpu.compare(&rgb, &gray);
+}
+
+/// BH16: the F29 dimension assert in `compare` -- a ref/mod shape mismatch
+/// reads out of bounds on the GPU (no CPU slice panic). Pin it.
+#[test]
+#[should_panic(expected = "matching dimensions")]
+fn phase_e_compare_panics_on_dimension_mismatch() {
+    let _gpu = gpu_lock();
+    let context = Arc::new(Context::new().expect("context"));
+    let gpu = GpuSsim::new(context).unwrap();
+    let a = gpu.create_image(&synth_rgba(64, 64, 0x5555_6666)).unwrap();
+    let b = gpu.create_image(&synth_rgba(64, 63, 0x7777_8888)).unwrap();
+    let _ = gpu.compare(&a, &b);
+}
+
+/// BH34: create_image_pair in SPLIT mode (per-scale flush into the SHARED
+/// passes Vec across BOTH images) must match batch pair and CPU. This is the
+/// T11 x F28 intersection where BH3/BH18 hide -- previously untested.
+#[test]
+fn phase_e_create_pair_split_matches_batch_and_cpu() {
+    let _gpu = gpu_lock();
+    let img1 = decode_rgba("../tests/test1-sm.png");
+    let img2 = decode_rgba("../tests/test2-sm.png");
+    let cpu = cpu_score(&img1, &img2);
+
+    for (dev_idx, context) in all_devices() {
+        let mut gpu_split = GpuSsim::new(context.clone()).unwrap();
+        gpu_split.set_split_threshold_for_test(0);
+        let (rs, ms) = gpu_split.create_image_pair(&img1, &img2).unwrap();
+        let split_pair = gpu_split.compare(&rs, &ms).unwrap();
+
+        let gpu_batch = GpuSsim::new(context).unwrap();
+        let (rb, mb) = gpu_batch.create_image_pair(&img1, &img2).unwrap();
+        let batch_pair = gpu_batch.compare(&rb, &mb).unwrap();
+
+        assert_eq!(
+            split_pair, batch_pair,
+            "device {dev_idx}: pair-split {split_pair} != pair-batch {batch_pair}"
+        );
+        assert_parity("pair-split-vs-cpu", split_pair, cpu);
+    }
+}

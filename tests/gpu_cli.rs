@@ -117,15 +117,17 @@ fn gpu_cli_matches_cpu() {
     eprintln!("cpu={} gpu={} diff={diff:.3e}", cpu_scores[0].1, gpu_scores[0].1);
     assert!(diff <= TOL, "CLI --gpu diverged from CPU: {diff:.3e} > {TOL:.0e}");
 
-    // Formatting check: the score column must be exactly 8 decimals.
-    for line in &cpu.stdout {
-        let score = line.split('\t').next().unwrap();
-        assert!(
-            score.contains('.'),
-            "no decimal point in {score:?}"
-        );
-        let frac = score.split('.').nth(1).unwrap_or("");
-        assert_eq!(frac.len(), 8, "expected 8 decimals, got {score:?}");
+    // BH7: check the format on BOTH outputs. The GPU print macro could drift
+    // (e.g. to {:.6}) and the parity diff above would still pass -- exactly the
+    // F7-class rot this test guards against. Assert the 8-decimal shape on the
+    // GPU stdout too, not just the CPU one.
+    for (tag, lines) in [("cpu", &cpu.stdout), ("gpu", &gpu.stdout)] {
+        for line in lines {
+            let score = line.split('\t').next().unwrap();
+            assert!(score.contains('.'), "{tag}: no decimal point in {score:?}");
+            let frac = score.split('.').nth(1).unwrap_or("");
+            assert_eq!(frac.len(), 8, "{tag}: expected 8 decimals, got {score:?}");
+        }
     }
 }
 

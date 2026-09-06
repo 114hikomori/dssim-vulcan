@@ -274,6 +274,16 @@ fn gpu_ssim_identity_is_exactly_one() {
             scale += 1;
         }
         eprintln!("device {dev_idx}: identity maps exactly 1.0 on all {scale} scales");
+        // BH8: guard against a vacuous pass. The while loop above is gated on
+        // read_dump(...).is_some() with hardcoded run numbers; if the dump
+        // numbering shifts (an extra next_run, a new hook) zero iterations run
+        // and the test passes having checked nothing. The sibling test floors
+        // its count (map_checks >= 20); do the same here.
+        assert!(
+            scale > 0,
+            "device {dev_idx}: identity test checked 0 scales -- dump numbering \
+             shifted and the test is now vacuous"
+        );
     }
 
     std::fs::remove_dir_all(&dir).ok();
