@@ -37,8 +37,11 @@ pub fn load_image_rgba(path: impl AsRef<Path>) -> Result<ImgVec<RGBAPLU>, load_i
         ImageData::RGB8(ref bitmap) => Ok(Img::new(bitmap.to_rgbaplu(), img.width, img.height)),
         ImageData::GRAY8(ref bitmap) => Ok(Img::new(bitmap.to_rgbaplu(), img.width, img.height)),
         ImageData::GRAYA8(ref bitmap) => Ok(Img::new(bitmap.to_rgbaplu(), img.width, img.height)),
-        // 16-bit inputs: the GPU path is 8-bit for now (u16 LUT is a
-        // profiling-justified extension, plan §4 Phase 6).
+        // 16-bit inputs: FULL precision. `to_rgbaplu()` maps each u16 through
+        // the 65536-entry linear LUT (dssim-core/src/linear.rs), so the GPU
+        // decode path is NOT truncated to 8-bit. BH9: an earlier note here
+        // claimed "the GPU path is 8-bit for now" -- false; pinned by
+        // load_image_rgba_preserves_16bit_precision.
         ImageData::RGBA16(ref bitmap) => Ok(Img::new(bitmap.to_rgbaplu(), img.width, img.height)),
         ImageData::RGB16(ref bitmap) => Ok(Img::new(bitmap.to_rgbaplu(), img.width, img.height)),
         ImageData::GRAY16(ref bitmap) => Ok(Img::new(bitmap.to_rgbaplu(), img.width, img.height)),
@@ -50,4 +53,36 @@ pub fn load_image_rgba(path: impl AsRef<Path>) -> Result<ImgVec<RGBAPLU>, load_i
 #[inline]
 pub fn load_image(attr: &Dssim, path: impl AsRef<Path>) -> Result<DssimImage<f32>, load_image::Error> {
     load(attr, path.as_ref())
+}
+
+
+#[cfg(test)]
+mod bit_depth {
+    /// BH9: the GPU decode path (`load_image_rgba`) must preserve full 16-bit
+    /// precision, not truncate to 8-bit. Encode a 16-bit PNG whose red channel
+    /// steps by 1 LSB (all four values share the high byte 0x01), decode it, and
+    /// assert the f32 outputs are all distinct -- an 8-bit truncation would
+    /// collapse them to one value. This pins the claim that the earlier
+    /// "GPU path is 8-bit for now" comment got wrong.
+    #[test]
+    fn load_image_rgba_preserves_16bit_precision() {
+        let dir = std::env::temp_dir().join(format!("dssim-16bit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("grad16.png");
+        let px: Vec<rgb::RGBA16> = (0x0100u16..0x0104)
+            .map(|r| rgb::RGBA16::new(r, 0x8000, 0x4000, 0xFFFF))
+            .collect();
+        lodepng::encode_file(&path, &px, 4, 1, lodepng::ColorType::RGBA, 16).unwrap();
+
+        let decoded = crate::load_image_rgba(&path).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (4, 1));
+        let rs: Vec<f32> = decoded.pixels().map(|p| p.r).collect();
+        for i in 1..rs.len() {
+            assert!(
+                rs[i] != rs[i - 1],
+                "16-bit red values collapsed to 8-bit: {rs:?}"
+            );
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

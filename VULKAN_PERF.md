@@ -62,7 +62,9 @@ cost (a standing non-goal to move it to the GPU).
 - **4K** uses the adaptive split-submit path (≥ 6 M px) to cap peak VRAM. The
   reduction is measured at 512² (6.27 MB saved, deterministic allocator
   counters) and extrapolates to ~400 MB at 4K; not measured at 4K directly.
-- **16-bit** inputs are handled as 8-bit on the GPU path (documented non-goal).
+- **16-bit** inputs are handled at full precision (u16→linear via the 65536-entry
+  LUT, same as CPU). BH9 corrected an earlier note here that wrongly called this
+  an 8-bit approximation / "documented non-goal."
 - Re-measure any time with the command at the top; the numbers above are a
   snapshot, not a contract.
 

@@ -394,3 +394,25 @@ fn phase_e_create_pair_rejects_size_mismatch() {
         "expected InvalidInput, got {err:?}"
     );
 }
+
+
+/// BH35: tiny RGB end-to-end (1x1, 7x7, 8x8) through create_image + compare.
+/// Only blur-level tiny sweeps existed; the full pipeline at sub-scale-cutoff
+/// sizes (pyramid collapses to 1 scale) was untested at the score level.
+#[test]
+fn phase_e_tiny_rgb_end_to_end() {
+    let _gpu = gpu_lock();
+    let devices = all_devices();
+    for (w, h) in [(1usize, 1usize), (7, 7), (8, 8)] {
+        let seed = (w * 131 + h * 17) as u64;
+        let a = synth_rgba(w, h, 0x1234_5678 ^ seed);
+        let b = synth_rgba(w, h, 0x9ABC_DEF0 ^ seed);
+        let cpu = cpu_score(&a, &b);
+        for (dev_idx, context) in &devices {
+            let gpu = GpuSsim::new(context.clone()).unwrap();
+            let r = gpu.create_image(&a).unwrap();
+            let m = gpu.create_image(&b).unwrap();
+            assert_parity(&format!("tiny {w}x{h} dev {dev_idx}"), gpu.compare(&r, &m).unwrap(), cpu);
+        }
+    }
+}

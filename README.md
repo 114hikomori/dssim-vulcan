@@ -33,8 +33,9 @@ There is an experimental Vulkan compute backend. It gives the same scores
 within a small floating-point tolerance (≤0.000005), but requires a Vulkan
 driver and ignores `-o` for now. It falls back to the CPU automatically when
 Vulkan is unavailable. Color profiles are applied identically to the CPU path
-(same decoder). Note that 16-bit images are handled as 8-bit on the GPU path,
-so very high-bit-depth inputs are a known gap (not yet at full precision):
+(same decoder). 16-bit inputs are handled at full precision — the u16→linear
+conversion uses the same 65536-entry LUT as the CPU path (BH9 corrected an
+earlier note that wrongly called this an 8-bit approximation):
 
     dssim --gpu file.png file-modified.png
 

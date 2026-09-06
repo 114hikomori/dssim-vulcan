@@ -1,8 +1,12 @@
 //! GPU SSIM combine — the Vulkan counterpart of `dssim.rs`'s
-//! `compare_scale_3ch` (3-channel) and `compare_scale` (1-channel).
-//! Statistics inputs are the blurred planes (mu, img_sq_blur, img1_img2_blur)
-//! that `blur_gpu` produces; the output is the per-pixel SSIM map. Pooling
-//! stays on the CPU (plan §6 Phase D).
+//! `compare_scale_3ch` (3-channel) and `compare_scale` (1-channel). The output
+//! is the per-pixel SSIM map; pooling stays on the CPU (plan §6 Phase D).
+//!
+//! BH33: two entry points. `combine_into` pushes the combine dispatch into a
+//! caller-owned `Vec<Pass>` -- the production path, where `GpuSsim::compare`
+//! reads device-resident mu/sq/cross planes produced by the blur `*_into`
+//! methods (not host buffers). `ssim_combine_gpu`/`ssim_combine_pipelines` are
+//! the host-in/host-out form used by the parity tests.
 
 use std::sync::Arc;
 

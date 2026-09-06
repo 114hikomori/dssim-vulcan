@@ -73,7 +73,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let map_output_file_tmp = matches.opt_str("o");
     let map_output_file = map_output_file_tmp.as_ref();
-    let use_gpu = matches.opt_present("gpu") && cfg!(feature = "gpu");
+    // BH14: --gpu is advertised in help even in gpu-less builds; if the flag is
+    // given but the feature is compiled out, say so instead of silently using
+    // the CPU path (the user thinks they're testing the GPU backend).
+    let gpu_requested = matches.opt_present("gpu");
+    if gpu_requested && !cfg!(feature = "gpu") {
+        eprintln!("warning: --gpu requested but this build has no Vulkan support (gpu feature off); using CPU");
+    }
+    let use_gpu = gpu_requested && cfg!(feature = "gpu");
 
     let files = matches.free;
 
@@ -151,18 +158,22 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(feature = "gpu")]
 fn run_gpu(map_output_file: Option<&String>, files: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     use imgref::ImgVec;
+    let context = match gpu_backend::Context::new() {
+        Ok(context) => std::sync::Arc::new(context),
+        // BH13: the CPU fallback CAN write -o maps, so honor them here. The old
+        // code warned "ignoring -o" BEFORE even trying the context, then fell
+        // back to a CPU path that never received map_output_file -- exit 0, no
+        // maps, and a misleading warning.
+        Err(e) => {
+            eprintln!("note: --gpu unavailable ({e}); falling back to CPU");
+            return run_cpu_simple(files, map_output_file);
+        }
+    };
+    // BH13: only now that the GPU path is actually running is -o genuinely
+    // unsupported (the GPU path returns pooled scores, not SsimMaps).
     if map_output_file.is_some() {
         eprintln!("warning: --gpu does not support -o map output yet; ignoring -o");
     }
-
-    let context = match gpu_backend::Context::new() {
-        Ok(context) => std::sync::Arc::new(context),
-        // Plan §6 Phase G: CPU fallback when no Vulkan device is available.
-        Err(e) => {
-            eprintln!("note: --gpu unavailable ({e}); falling back to CPU");
-            return run_cpu_simple(files);
-        }
-    };
     // Positive signal that the GPU path is actually running. The gpu_cli test
     // asserts this line is present (not merely that the fallback note is
     // absent) so the check cannot silently rot if the fallback wording changes.
@@ -239,15 +250,20 @@ fn run_gpu(map_output_file: Option<&String>, files: &[String]) -> Result<(), Box
     // exit 1, honoring the "--gpu falls back if unavailable" contract.
     if gpu_limits_exceeded.get() {
         eprintln!("note: --gpu device limits can't handle this image size; falling back to CPU");
-        return run_cpu_simple(files);
+        return run_cpu_simple(files, map_output_file);
     }
     scope_result.map_err(|e| -> Box<dyn std::error::Error> { e })
 }
 
-/// CPU fallback used when `--gpu` is requested but no Vulkan device is
-/// available. Same output as the default CPU path.
-fn run_cpu_simple(files: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let attr = dssim::Dssim::new();
+/// CPU fallback used when `--gpu` is requested but can't run (no Vulkan device,
+/// or BH2 device limits). Same output as the default CPU path. BH13: it also
+/// honors `-o` map output, since the CPU path can write maps even though the
+/// GPU path cannot.
+fn run_cpu_simple(files: &[String], map_output_file: Option<&String>) -> Result<(), Box<dyn std::error::Error>> {
+    let mut attr = dssim::Dssim::new();
+    if map_output_file.is_some() {
+        attr.set_save_ssim_maps(8);
+    }
     let mut files = files.iter();
     let file1 = files.next().ok_or("You must specify at least 2 files to compare")?;
     let original = dssim::load_image(&attr, file1)
@@ -260,8 +276,11 @@ fn run_cpu_simple(files: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             return Err(format!("Image {} has a different size ({}x{}) than {} ({}x{})",
                 file2, modified.width(), modified.height(), file1, original.width(), original.height()).into());
         }
-        let (dssim, _) = attr.compare(&original, modified);
+        let (dssim, ssim_maps) = attr.compare(&original, modified);
         println!("{dssim:.8}\t{}", file2);
+        if let Some(map_output_file) = map_output_file {
+            write_ssim_maps(&ssim_maps, map_output_file)?;
+        }
     }
     Ok(())
 }

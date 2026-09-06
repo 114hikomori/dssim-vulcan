@@ -1,9 +1,17 @@
 //! Vulkan blur dispatches — the GPU counterparts of `dssim-core::blur`
-//! (`blur`, `blur_in_place`, `blur_mul`). Each is one submit with two passes:
-//! H5 then V5, with a barrier between them (the V5 pass reads the H5 output),
-//! matching the CPU's sequential H→V structure. Kernel weights are the exact
-//! f32 values from `dssim_core::blur::K5_REF`, passed via push constants so
-//! the shader never re-derives them.
+//! (`blur`, `blur_in_place`, `blur_mul`). Kernel weights are the exact f32
+//! values from `dssim_core::blur::K5_REF`, passed via push constants so the
+//! shader never re-derives them.
+//!
+//! Two shapes live here (BH33: the module used to claim "each is one submit
+//! with two passes," which is only the host wrappers):
+//! - The `*_into` methods (`h5_into`, `v5_into`, `h5_mul_into`) push individual
+//!   passes into a CALLER-OWNED `Vec<Pass>` so the whole pyramid (many passes
+//!   across scales/channels) goes out in ONE `dispatch_sequence` — this is the
+//!   production path used by `GpuSsim::create_image`/`compare`.
+//! - `blur`/`blur_mul` (and the `*_gpu` free functions) are self-contained
+//!   host-in/host-out helpers that upload, run H5→V5 as one two-pass submit,
+//!   and download — used by the blur parity tests and as a reference.
 
 use std::sync::Arc;
 

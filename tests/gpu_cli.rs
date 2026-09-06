@@ -231,3 +231,81 @@ fn gpu_cli_size_mismatch_matches_cpu_error() {
     assert!(!cpu.status.success(), "CPU path should fail on size mismatch");
     assert!(!gpu.status.success(), "GPU path should fail on size mismatch");
 }
+
+
+/// BH35: identity through the CLI must print the exact string "0.00000000"
+/// (the CPU path does; the GPU path must match byte-for-byte, not just within
+/// tolerance). Also proves the loop runs and the format is 8 decimals.
+#[test]
+fn gpu_cli_identity_is_exact_zero_string() {
+    let _serial = gpu_lock();
+    if !vulkan_available() {
+        eprintln!("SKIPPED: no Vulkan device for identity CLI check.");
+        return;
+    }
+    let gpu = run_cli(&["--gpu", "tests/test1-sm.png", "tests/test1-sm.png"]);
+    assert!(gpu.success, "GPU identity run failed:\n{}", gpu.stderr);
+    assert!(gpu.stderr.contains("dssim: gpu device:"), "GPU did not engage:\n{}", gpu.stderr);
+    assert_eq!(gpu.stdout.len(), 1, "expected one output line");
+    let score = gpu.stdout[0].split('\t').next().unwrap();
+    assert_eq!(score, "0.00000000", "identity must print exactly 0.00000000, got {score:?}");
+}
+
+/// BH35: the 1-original-vs-N-modified streaming loop body must run MORE than
+/// one iteration (every other CLI fixture is 1-vs-1, so the loop never repeats
+/// -- the reused-original-across-comparisons path was untested).
+#[test]
+fn gpu_cli_one_vs_many_streams() {
+    let _serial = gpu_lock();
+    if !vulkan_available() {
+        eprintln!("SKIPPED: no Vulkan device for 1-vs-N CLI check.");
+        return;
+    }
+    let cpu = run_cli(&["tests/test1-sm.png", "tests/test2-sm.png", "tests/test2-sm.png"]);
+    assert!(cpu.success, "CPU 1-vs-2 failed:\n{}", cpu.stderr);
+    let gpu = run_cli(&["--gpu", "tests/test1-sm.png", "tests/test2-sm.png", "tests/test2-sm.png"]);
+    assert!(gpu.success, "GPU 1-vs-2 failed:\n{}", gpu.stderr);
+    assert!(gpu.stderr.contains("dssim: gpu device:"), "GPU did not engage:\n{}", gpu.stderr);
+    assert_eq!(gpu.stdout.len(), 2, "expected two output lines (loop ran >1 iteration)");
+    assert_eq!(cpu.stdout.len(), 2);
+    let cs = parse_scores(&cpu.stdout);
+    let gs = parse_scores(&gpu.stdout);
+    for i in 0..2 {
+        let diff = (cs[i].1 - gs[i].1).abs();
+        assert!(diff <= TOL, "1-vs-N line {i}: cpu {} gpu {} ({diff:.1e})", cs[i].1, gs[i].1);
+    }
+}
+
+/// BH35: a decode error must exit non-zero on BOTH paths (the CLI never tests
+/// the error text/exit path).
+#[test]
+fn gpu_cli_decode_error_exits_nonzero() {
+    let _serial = gpu_lock();
+    let missing = "tests/definitely-not-a-real-file.png";
+    let cpu = Command::new(env!("CARGO_BIN_EXE_dssim")).args([missing, "tests/test2-sm.png"]).output().expect("runs");
+    let gpu = Command::new(env!("CARGO_BIN_EXE_dssim")).args(["--gpu", missing, "tests/test2-sm.png"]).output().expect("runs");
+    assert!(!cpu.status.success(), "CPU should fail on a missing input");
+    assert!(!gpu.status.success(), "GPU should fail on a missing input");
+}
+
+/// BH35: gray PNGs end-to-end through the CLI (both paths route gray->3ch; the
+/// claim was unproven at CLI level).
+#[test]
+fn gpu_cli_gray_pair_matches_cpu() {
+    let _serial = gpu_lock();
+    if !vulkan_available() {
+        eprintln!("SKIPPED: no Vulkan device for gray CLI check.");
+        return;
+    }
+    let pair = ["tests/gray1-rgba.png", "tests/gray1-gray.png"];
+    let cpu = run_cli(&pair);
+    assert!(cpu.success, "CPU gray failed:\n{}", cpu.stderr);
+    let gpu = run_cli(&["--gpu", pair[0], pair[1]]);
+    assert!(gpu.success, "GPU gray failed:\n{}", gpu.stderr);
+    assert!(gpu.stderr.contains("dssim: gpu device:"), "GPU did not engage:\n{}", gpu.stderr);
+    let cs = parse_scores(&cpu.stdout)[0].1;
+    let gs = parse_scores(&gpu.stdout)[0].1;
+    let diff = (cs - gs).abs();
+    eprintln!("gray CLI: cpu={cs:.8} gpu={gs:.8} diff={diff:.3e}");
+    assert!(diff <= TOL, "gray CLI parity: {cs} vs {gs} ({diff:.3e})");
+}

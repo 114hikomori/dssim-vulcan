@@ -98,8 +98,8 @@ fn main() {
 
     let sizes: &[(usize, usize)] = &[(320, 200), (1024, 1024), (2048, 2048), (4096, 4096)];
     println!(
-        "{:>12} {:>9} {:>9} {:>7} {:>9} {:>9} {:>9} {:>9} {:>10}",
-        "image", "cpu_ms", "gpu_ms", "ratio", "create_ms", "create_gpu", "compare_ms", "compare_gpu", "dssim_check"
+        "{:>12} {:>9} {:>9} {:>7} {:>9} {:>7} {:>9} {:>9} {:>9} {:>9} {:>10}",
+        "image", "cpu_ms", "gpu_ms", "ratio", "cli_ms", "cli_ratio", "create_ms", "create_gpu", "compare_ms", "compare_gpu", "dssim_check"
     );
 
     for &(w, h) in sizes {
@@ -137,6 +137,21 @@ fn main() {
             iters,
         );
 
+        // BH15: the CLI (run_gpu) does NOT use create_image_pair -- it streams
+        // create_image(original) once + create_image(modified) per comparison,
+        // i.e. TWO create fences + compare. gpu_ms above uses the merged pair
+        // (one create fence), so it understates the real CLI path. Measure the
+        // CLI shape (two separate creates + compare) and report its ratio too.
+        let cli_ms = time_ms(
+            || {
+                let r = gpu.create_image(&a).unwrap();
+                let m = gpu.create_image(&b).unwrap();
+                let _ = gpu.compare(&r, &m).unwrap();
+            },
+            2,
+            iters,
+        );
+
         // Phase breakdown: create_image (CPU downsample+pack+upload, one GPU
         // submit) vs compare (cross-blur+combine submit + map readback). The
         // *_gpu columns are GPU-busy time (T9-lite timestamps); wall-minus-gpu
@@ -164,11 +179,13 @@ fn main() {
         assert!((0.0..1.0).contains(&gpu_score), "implausible score {gpu_score}");
 
         println!(
-            "{:>12} {:>9.2} {:>9.2} {:>7.2} {:>9.2} {:>9.2} {:>9.2} {:>9.2} {:>10.6}",
+            "{:>12} {:>9.2} {:>9.2} {:>7.2} {:>9.2} {:>7.2} {:>9.2} {:>9.2} {:>9.2} {:>9.2} {:>10.6}",
             format!("{w}x{h}"),
             cpu,
             gpu_ms,
             gpu_ms / cpu,
+            cli_ms,
+            cli_ms / cpu,
             create_ms,
             create_gpu,
             compare_ms,
