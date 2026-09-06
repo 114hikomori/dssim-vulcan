@@ -457,3 +457,27 @@ Milestone ids refer to `dssim-vulkan-fable-plan.md` §16 (also listed in `AGENTS
   lavapipe). Remaining audit items after that: none from Pass 1/2 except the
   conditional F28 byte-level VRAM measurement (deferred) and F13's optional
   profile-bearing fixture demonstration.
+
+## 2026-09-06 — F13 + F28 closed out (demonstrated / measured, not just argued)
+- F13: added gpu_cli_applies_icc_profile_identically_to_cpu. profile.png has an
+  iCCP chunk; profile-stripped.png has the same color baked into DIFFERING raw
+  pixels (verified: IDAT differs, iCCP present/absent via chunk dump). Both CPU
+  and GPU decode give dssim 0.0 for the pair -- which only happens if the
+  profile is applied (raw pixels differ), so this EMPIRICALLY proves the GPU
+  path applies ICC identically to CPU. Closes the "correct OR demonstrate"
+  option from the audit (previously only the comment was corrected).
+- F28: Context now tracks live+peak allocation bytes (AtomicUsize in
+  alloc_buffer / BufferInner::drop) with live_alloc_bytes/peak_alloc_bytes/
+  reset_alloc_peak. phase_e_split_submit_lowers_peak_vram forces batch vs split
+  via the seam on 512^2 and MEASURES peaks: batched 25.1 MB vs split 18.9 MB,
+  6.27 MB saved on both GPUs -- matches the analytical ~24 B/px (=> ~400 MB at
+  4K). The VRAM reduction is now measured, not inferred.
+- Verified: full workspace green WITH validation + --nocapture (0 vulkan errors,
+  validation ENABLED 71x, 15 suites); clippy --no-deps -D warnings clean.
+- Deviated from plan: none.
+- Audit status: ALL findings F1-F33 now addressed. F28's byte-level measurement
+  and F13's fixture demonstration (the two remaining "optional" items) are done.
+  No open audit findings remain.
+- Next: push db7240f and confirm run #8 green on lavapipe (new F13 profile test
+  + F28 measurement test). Then the port is at M10 with a clean audit, CI
+  validation+clippy gates, and measured perf/VRAM.
