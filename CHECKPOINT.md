@@ -817,3 +817,8 @@ Milestone ids refer to `dssim-vulkan-fable-plan.md` §16 (also listed in `AGENTS
 - Pushing 8b32391 (BH38 CI-gate revert + audit/checkpoint corrections) + this
   note. origin/main is currently red (run #16 on the byte-compare gate); this
   restores green (run #17 = steps 1-8 only, no freshness gate).
+
+## 2026-09-07 — push authorized (quote): README update
+- User authorization for this push, verbatim this session: "push".
+- Pushing a632933 (README: document this repo's usage/build/dev) + this note.
+  Doc-only change; CI should mirror #17 green (no code/shader touched).
