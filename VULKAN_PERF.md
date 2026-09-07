@@ -158,3 +158,40 @@ stable signals are `create_gpu` (~5 ms) and the wall drop from the memcpy+T7+T11
 (4K create 421→331 ms). Remaining tracks (T10 barrier-tighten, T3 descriptor
 pre-alloc) target CPU-side micro-overhead already dwarfed by the WC-transfer +
 CPU-downsample floor — diminishing returns, not done. T5/T6a refuted by T9-lite.
+
+## Phase H consolidated plan — Tier 0 + Tier 1 executed (2026-09-07)
+
+`PHASE_H_CONSOLIDATED_PLAN.md` (merges 4 AI addon docs) listed the only open
+host-side question as Tier 0 and three capability probes as Tier 1. Both run now;
+results recorded here (the plan defers to this file as the authoritative record).
+
+**Tier 0 — is the zero-copy BAR write the floor? YES.** New `#[ignore]`d
+`nt_store_vs_memcpy_wc` microbench writes 64 MB into the WC mapped pointer two
+ways (RX 6600M, ReBAR, unified=true), 3 rounds:
+
+| write | GB/s |
+|---|---|
+| `copy_nonoverlapping` (production path) | 5.30–5.49 |
+| `_mm_stream_ps` (non-temporal) | 5.09–5.14 |
+
+NT stores are ~4% *slower* than the plain sequential memcpy — the write is
+already at the WC-BAR floor (the plan's ~2.7 GB/s "effective" figure folded in
+CPU downsample + recording; the raw write is ~5.3 GB/s). Per the plan's gate,
+(c) fails → (d) dedicated-queue SDMA is NOT green-lit (it's "only if (c) is
+promising" and collides with BH5's `submit_lock`). **Host prep is done; large-
+size wall-time optimization stops here.**
+
+**Tier 1 — capability probes, all drop (no code):**
+- H5 `VK_EXT_external_memory_host`: extension present, but moot — both GPUs
+  already write direct via ReBAR zero-copy and Tier 0 shows the write is at the
+  floor; importing an external host pointer can't beat it.
+- H9 `VK_EXT_descriptor_heap`: **absent** on this driver (0 vulkaninfo mentions).
+- H21 `VK_EXT_host_image_copy`: **absent**, and the pipeline has **0 `vk::Image`
+  objects** (all buffers) → N/A by construction.
+
+**Net:** the plan's actionable OPEN items are settled. Tiers 2–4 are parked by
+Tier 0's negative result (and gated on "does 320×200 latency matter" — GPU is
+already 0.42× there); Tier 3 (GPU compute) is explicitly "do NOT start now"
+(GPU-busy ~5%); Tier 5 (H6 GPU downsample) is a standing non-goal needing human
+authorization. No further optimization is warranted without a new product
+decision.

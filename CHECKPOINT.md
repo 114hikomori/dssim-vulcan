@@ -697,3 +697,30 @@ Milestone ids refer to `dssim-vulkan-fable-plan.md` §16 (also listed in `AGENTS
 - Next: push the 10 bug-hunt commits (needs the user's word) + watch CI -- the
   new BH6 staging leg (DSSIM_UNIFIED=0) and BH5 concurrency test run there for
   the first time.
+
+## 2026-09-07 — Phase H consolidated plan: Tier 0 + Tier 1 executed
+- User directed work per PHASE_H_CONSOLIDATED_PLAN.md (merges 4 AI addon docs;
+  its thesis: don't re-run closed experiments). Ran its two actionable tiers.
+- Tier 0 (the only open host-side question): added #[ignore]d
+  nt_store_vs_memcpy_wc microbench. Result: NT (_mm_stream_ps) stores are ~4%
+  SLOWER than the production memcpy into the WC mapped BAR (5.1 vs 5.3-5.5 GB/s,
+  3 rounds, RX 6600M ReBAR). Write is at the floor. Per the plan's gate, (c)
+  fails -> (d) SDMA not green-lit (needs BH5 submit_lock redesign; "only if (c)
+  promising"). HOST PREP DONE; large-size wall-time work stops.
+- Tier 1 (capability probes, admit-or-drop): H5 external_memory_host present but
+  moot (already zero-copy direct + floor confirmed); H9 descriptor_heap ABSENT;
+  H21 host_image_copy ABSENT + 0 vk::Image objects (all buffers, N/A). All drop,
+  no code.
+- Tiers 2-4 parked by Tier 0's negative result; Tier 3 (GPU compute) explicitly
+  "do NOT start now" (GPU-busy ~5%); Tier 5 (H6 GPU downsample) is a standing
+  non-goal needing human authorization. No further optimization warranted without
+  a new product decision.
+- Verified: full workspace green WITH validation (0 vulkan errors, 15 suites),
+  clippy --no-deps -D warnings clean. Microbench is #[ignore] + x86_64-gated.
+- Deviated from plan: none -- executed exactly the plan's Tier 0/1 and honored
+  its gates (did NOT plunge into parked/gated Tiers 2-5).
+- Blocked / open question: none. Tiers 2/4/5 are user decisions (does small-image
+  latency matter / is there a 1-vs-N product need / authorize the non-goal?).
+- Next: push the bug-hunt (11 commits) + this Tier 0/1 work (needs user's word);
+  then Phase H is genuinely complete -- no open optimization remains that isn't
+  parked-by-measurement or gated-on-a-human-decision.

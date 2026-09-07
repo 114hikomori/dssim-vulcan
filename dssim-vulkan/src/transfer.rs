@@ -389,4 +389,62 @@ mod upload_diag {
         eprintln!("cached-Vec same-loop={:.2}ms", t.elapsed().as_secs_f64() * 1000.0);
         std::hint::black_box(&v);
     }
+
+    /// Tier-0 (PHASE_H_CONSOLIDATED_PLAN §4): is the ~2.7 GB/s zero-copy BAR
+    /// write truly the hardware floor, or do non-temporal (streaming) stores
+    /// beat the plain memcpy into the mapped pointer? Writes 64 MB (scale-0
+    /// size) from a source Vec into a fresh WC-mapped gpu-allocator buffer two
+    /// ways -- `copy_nonoverlapping` (what the production path does) and
+    /// `_mm_stream_ps` (NT) -- and reports GB/s for each. This isolates the
+    /// write mechanism; the plain-staging DMA form already lost to zero-copy in
+    /// the F34 A/B (87 vs 66 ms @2048^2), so the only unprobed lever is NT.
+    /// #[ignore] (timing is machine-dependent).
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    #[ignore = "Tier-0 NT-store microbench; run with --ignored --nocapture"]
+    fn nt_store_vs_memcpy_wc() {
+        use std::arch::x86_64::{_mm_loadu_ps, _mm_sfence, _mm_stream_ps};
+        let ctx = Arc::new(Context::new().expect("context"));
+        eprintln!(
+            "device: {} (unified={})",
+            ctx.device_name(),
+            ctx.is_unified_memory()
+        );
+        let bytes = 64 * 1024 * 1024;
+        let n = bytes / 4;
+        let src: Vec<f32> = (0..n).map(|i| (i & 1023) as f32).collect();
+
+        let b = ctx
+            .alloc_buffer(
+                "diag.wc",
+                bytes as u64,
+                vk::BufferUsageFlags::STORAGE_BUFFER,
+                MemoryLocation::CpuToGpu,
+            )
+            .unwrap();
+        let ptr = b.allocation.as_ref().unwrap().mapped_ptr().unwrap().as_ptr() as *mut f32;
+        assert_eq!(ptr as usize % 16, 0, "mapped ptr must be 16B-aligned for NT stores");
+        let gbs = |ms: f64| (bytes as f64 / 1e9) / (ms / 1e3);
+
+        // Warm both paths once (first-touch), then time.
+        for round in 0..3 {
+            unsafe {
+                let t = Instant::now();
+                std::ptr::copy_nonoverlapping(src.as_ptr() as *const u8, ptr as *mut u8, bytes);
+                _mm_sfence();
+                let ms = t.elapsed().as_secs_f64() * 1000.0;
+                eprintln!("round {round}: memcpy   {ms:6.2} ms = {:5.2} GB/s", gbs(ms));
+
+                let t = Instant::now();
+                let mut i = 0;
+                while i < n {
+                    _mm_stream_ps(ptr.add(i), _mm_loadu_ps(src.as_ptr().add(i)));
+                    i += 4;
+                }
+                _mm_sfence();
+                let ms = t.elapsed().as_secs_f64() * 1000.0;
+                eprintln!("round {round}: NT-store {ms:6.2} ms = {:5.2} GB/s", gbs(ms));
+            }
+        }
+    }
 }
