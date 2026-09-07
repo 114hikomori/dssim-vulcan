@@ -194,6 +194,49 @@ fn main() {
         );
     }
 
+    // Tier 4 (H23): resident-reference batch amortization. One reference vs N
+    // modifieds at a fixed size; per-modified cost should FALL as N grows
+    // because the reference's create is amortized over the batch (compare_many
+    // keeps the reference pyramid resident, only the modifieds churn). GPU batch
+    // vs CPU batch, per-modified ms.
+    let (bw, bh) = (1024usize, 1024usize);
+    let (orig, _) = noise_pair(bw, bh, 0xBA7C_0001);
+    let mods: Vec<_> = (0..10)
+        .map(|i| noise_pair(bw, bh, 0xBA7C_1000 + i as u64).1)
+        .collect();
+    let gpu = GpuSsim::new(context.clone()).unwrap();
+    println!("\nTier 4 batch (resident reference, {bw}x{bh}), per-modified ms:");
+    println!("{:>4} {:>10} {:>10} {:>7}", "N", "cpu_batch", "gpu_batch", "ratio");
+    for &n in &[1usize, 5, 10] {
+        let attr = Dssim::new();
+        let cpu_batch = time_ms(
+            || {
+                let r = attr.create_image(&orig).unwrap();
+                for m in &mods[..n] {
+                    let mm = attr.create_image(m).unwrap();
+                    let _ = attr.compare(&r, mm);
+                }
+            },
+            1,
+            3,
+        ) / n as f64;
+        let gpu_batch = time_ms(
+            || {
+                let r = gpu.create_image(&orig).unwrap();
+                let _ = gpu.compare_many(&r, &mods[..n]).unwrap();
+            },
+            1,
+            3,
+        ) / n as f64;
+        println!(
+            "{:>4} {:>10.2} {:>10.2} {:>7.2}",
+            n,
+            cpu_batch,
+            gpu_batch,
+            gpu_batch / cpu_batch
+        );
+    }
+
     eprintln!("\nNote: GPU path is the optimized Phase-H shape — create_image writes");
     eprintln!("the pyramid upload straight into mapped staging (no intermediate");
     eprintln!("Vec/memcpy passes), compare runs one batched submit over GPU-resident");

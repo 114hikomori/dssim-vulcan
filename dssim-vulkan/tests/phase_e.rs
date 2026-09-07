@@ -451,3 +451,34 @@ fn phase_e_concurrent_submits_are_serialized() {
         assert_parity(&format!("concurrent submit {i}"), *score, cpu);
     }
 }
+
+
+/// Tier 4: compare_many (resident reference vs N modifieds) must equal the
+/// individual create+compare results and the CPU reference for each.
+#[test]
+fn phase_e_compare_many_matches_individual_and_cpu() {
+    let _gpu = gpu_lock();
+    let (w, h) = (96usize, 80usize);
+    let orig = synth_rgba(w, h, 0x1111_2222);
+    let mods: Vec<_> = (0..3u64).map(|i| synth_rgba(w, h, 0x3333_4444 ^ i)).collect();
+    let cpus: Vec<f64> = mods.iter().map(|m| cpu_score(&orig, m)).collect();
+
+    for (dev_idx, context) in all_devices() {
+        let gpu = GpuSsim::new(context).unwrap();
+        let r = gpu.create_image(&orig).unwrap();
+        let many = gpu.compare_many(&r, &mods).unwrap();
+        assert_eq!(many.len(), 3);
+        for i in 0..3 {
+            let one = {
+                let m = gpu.create_image(&mods[i]).unwrap();
+                gpu.compare(&r, &m).unwrap()
+            };
+            assert_eq!(
+                many[i], one,
+                "dev {dev_idx} mod {i}: many {} != individual {one}",
+                many[i]
+            );
+            assert_parity(&format!("compare_many[{i}]"), many[i], cpus[i]);
+        }
+    }
+}

@@ -509,6 +509,26 @@ impl GpuSsim {
 
         Ok(to_dssim(ssim_sum / weight_sum))
     }
+
+    /// Tier 4 (H23): compare one already-resident reference against many
+    /// modifieds, reusing the reference's GPU pyramid across every comparison
+    /// (the original is created once and never re-uploaded). This is the
+    /// resident-reference / batch pattern the CLI's 1-vs-N streaming relies on;
+    /// the per-modified cost is `create_image` + `compare`, with the reference's
+    /// create amortized over the whole batch. Each modified's transient pyramid
+    /// is freed before the next, so peak VRAM stays ~one image + the reference.
+    pub fn compare_many(
+        &self,
+        reference: &GpuSsimImage,
+        modifieds: &[ImgVec<dssim_core::RGBAPLU>],
+    ) -> Result<Vec<f64>> {
+        let mut out = Vec::with_capacity(modifieds.len());
+        for m in modifieds {
+            let mg = self.create_image(m)?;
+            out.push(self.compare(reference, &mg)?);
+        }
+        Ok(out)
+    }
 }
 
 /// One pyramid scale of statistics for one image. All buffers hold
