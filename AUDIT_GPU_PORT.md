@@ -578,3 +578,22 @@ bitwise-transcription claim survives instruction-level adversarial
 inspection; the CPU reference is untouched. One real API-robustness gap
 (BH36), two nits (BH37/BH38). Tier-5 authorization confirmed by the user
 post-hoc (see approval note above).
+
+### Pass 9 resolution (BH36/37/38 fixed, 2026-09-07)
+
+- **BH36** (f1781f6): `compare_many` now guards reference channels (==3) and each
+  modified's scale-0 dims up front, returning `Error::InvalidInput` before any
+  dispatch (mirrors create_image_pair's BH3). Added `GpuSsimImage::channels()` +
+  `phase_e_compare_many_rejects_size_mismatch`.
+- **BH37** (f1781f6): `create_image_gray` documents Device-is-RGB-only + a
+  `debug_assert_eq!(prep_mode, Cpu)` at the gray entry (release = correct CPU
+  fallback, not a silent unoptimized surprise). `--gpu-prep` without `--gpu` now
+  warns it is ignored.
+- **BH38** (f1781f6): CI step installs `glslc`, recompiles every `.comp` with the
+  same `--target-env=vulkan1.3 -O`, byte-compares to the committed `.spv`, fails
+  on any diff. Verified locally: all 8 `.comp` fresh-match. Non-vacuous by design
+  (fails loudly if glslc is unavailable rather than skipping).
+
+Tier-5 authorization quote: the implementer's checkpoint said "as the user
+authorized" without a verbatim quote (same shape as P5); the user confirmed in the
+auditing session. Standing rule already recorded (quote at push/record time).

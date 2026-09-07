@@ -768,3 +768,19 @@ Milestone ids refer to `dssim-vulkan-fable-plan.md` §16 (also listed in `AGENTS
   gate) — all recorded in AUDIT_GPU_PORT.md pass 9.
 - Next: implementer to pick up BH36/37/38 when convenient; push the 2 local
   audit commits on the user's word.
+
+## 2026-09-07 — Audit Pass 9 (BH36/37/38) closed
+- Pass 9 (auditor, 52aafc2/bfbf326) verified Tier 0/1/4/5 (VERIFIED WITH CAVEATS):
+  NT floor reproduced, Tier-5 transcription proven instruction-level (OpFma=0,
+  left-assoc match, dssim-core diff EMPTY, default path byte-identical), CI #15
+  green. Tier-5 authorization confirmed genuine by the user.
+- Fixed the 3 new items (f1781f6): BH36 compare_many up-front dims/channels guard
+  (Err not post-dispatch panic) + channels() + test; BH37 gray+Device documented
+  + debug_assert + --gpu-prep-without---gpu warning; BH38 CI .spv-freshness gate
+  (glslc recompile + byte-compare; all 8 verified fresh-match locally).
+- Verified: full workspace green WITH validation (0 vulkan errors, 15 suites;
+  phase_e now 16 tests), clippy clean. No shader/.spv change; default path intact.
+- Deviated from plan: none.
+- Blocked / open question: none.
+- Next: push Pass-9 fixes (f1781f6 + this + audit doc) — needs user's word; CI
+  will run the new .spv-freshness gate (glslc via apt) + compare_many guard test.
