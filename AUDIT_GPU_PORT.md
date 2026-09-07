@@ -508,3 +508,71 @@ Status: dormant observation, capture the dying binary if it returns.
 **VERIFIED.** F34 fixed with more rigor than the finding asked for; every
 number in the fix commit reproduces. No new findings. Open items: none in
 code; `fbf67f8`+`61bd7c8`+`ca5321f` (+ this pass) await a push decision.
+
+---
+
+## Pass 9 — Tier 0/1/4/5 execution (`99f233a`, `93f14c3`, `921feea`)
+
+Pinned to `e738cb4` (pushed; CI run #15 green — device-prep bitwise tests,
+BH6 staging leg, BH5 concurrency test all pass on llvmpipe). Two verifier
+sub-agents (Tier-5 transcription; Tier-4 + wholesale hygiene) + main-agent
+dynamic runs.
+
+**Reproduced:**
+- Tier 0: NT-store microbench re-run — memcpy 5.25–5.54 GB/s vs NT
+  5.28–5.29 (NT ~1–4% SLOWER, claim "~4% slower" ✓). Floor confirmed;
+  SDMA correctly not green-lit per the plan's own gate.
+- Tier 1: probes dropped (descriptor_heap absent, host_image_copy absent +
+  zero VkImage objects, external_memory_host present-but-moot). No code —
+  matches plan.
+- Tier 4: batch per-modified 38.6→26.7 ms (N 1→10, claim 35.5→24.6 — same
+  amortization shape, noise band); pin test exact-equality N=3, non-vacuous.
+- Tier 5: create 2048² 68.3→18.1 ms (0.26×, claim 66→18 ✓), 4096²
+  299→179 ✓. Transcription verified instruction-level by the sub-agent:
+  CPU `(((a+b)+c)+d)*0.25` left-assoc f32 == SPV OpFAdd chain ×4 then
+  VectorTimesScalar, NoContraction present, **OpFma = 0** (main-agent
+  spirv-dis), odd floor-drop + host-side stop condition match, alpha
+  averaged like RGBAPLU. SPV 8/8 fresh-match; dssim-core diff EMPTY (the
+  red-flag check — CPU ground truth untouched); default path byte-identical
+  (only additions: one pipeline at init + mode dispatch); workspace green,
+  clippy clean, no test weakening in range.
+
+**New findings:**
+
+**BH36 (medium, API robustness) — `compare_many` lacks the BH3-style up-front
+dims guard.** score.rs:724-735 loops `create_image(m)` (full GPU dispatch)
+BEFORE `compare()`'s mismatch checks fire — and those are `assert_eq!`
+PANICS, not `Error::InvalidInput`. One mismatched modified wastes its whole
+pyramid build, then panics mid-batch discarding already-computed scores —
+wrong failure mode for a Result-returning batch API. `create_image_pair` has
+the correct guard (score.rs:180-194); `compare_many` should copy it (check
+each modified's dims/channels against reference before any dispatch) + a
+mismatch test. Not memory-unsafe (panic precedes the mismatched compare's
+dispatch; split threshold reads modified's own size).
+
+**BH37 (low, discoverability) — `PrepMode::Device` + gray is a silent no-op.**
+`create_image_gray` never consults `prep_mode` (always CPU-downsamples); a
+library caller combining `with_prep_mode(Device)` with gray inputs gets
+silently-unoptimized behavior. CLI can't hit it (RGB-only path). Fix: doc
+line or debug_assert at the gray entry. Related nit: `--gpu-prep=device`
+without `--gpu` parses but is silently ignored.
+
+**BH38 (low, process) — no automated .spv-freshness gate in CI.** The
+"8/8 fresh-match" claims are manual-audit each pass (true every time so far,
+including this one); ci.yml never recompares committed blobs vs glslc output.
+One CI step (compile + hash-compare) would make the invariant enforced
+rather than ritual.
+
+**Approval note:** Tier 5 is a standing non-goal; the checkpoint records "as
+the user authorized (opt-in, Mode A)" but without a verbatim quote (unlike
+the push note, which quotes "push"). Auditor could not verify the Tier-5
+authorization from this session — flagged for the human to confirm, same
+shape as P2/P5 (both of which were genuine).
+
+### Pass 9 verdict
+
+**VERIFIED WITH CAVEATS.** Tier 0/1 executed exactly per the plan's gates
+(including honoring the negative result); Tier 4/5 claims reproduce and the
+bitwise-transcription claim survives instruction-level adversarial
+inspection; the CPU reference is untouched. One real API-robustness gap
+(BH36), two nits (BH37/BH38), one authorization to confirm.
