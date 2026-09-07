@@ -792,3 +792,21 @@ Milestone ids refer to `dssim-vulkan-fable-plan.md` §16 (also listed in `AGENTS
 - CI #16 firsts to watch: the new .spv-freshness gate (glslc via apt — if the
   runner lacks the package the step fails loudly, then switch to SDK), and
   phase_e_compare_many_rejects_size_mismatch (BH36 guard).
+
+## 2026-09-07 — BH38 CI gate REVERTED (run #16 failed)
+- Pushed Pass-9 fixes; CI run #16: steps 1-8 green (glslc IS apt-installable),
+  but the new BH38 .spv-freshness byte-compare step FAILED -- flagged all 8
+  shaders stale. Root cause: apt glslc != the pinned SDK glslc (1.4.357.0) that
+  built the committed blobs; SPIR-V is not byte-stable across glslc versions. My
+  BH38 premise was wrong; CI caught it (the gate is exactly the kind of thing
+  that must be verified on the real runner, not just locally).
+- Reverted the CI step + glslc-from-apt. BH38 intent stays satisfied by the
+  per-pass manual fresh-match against the SDK glslc (8/8, incl. this pass).
+  Automating would need pinning the full SDK in CI -- heavy/brittle for a low
+  finding, not worth it. BH36/BH37 (code) unaffected + still green.
+- Verified: workspace builds clean; the code tests were green pre-revert (only
+  ci.yml changed). Re-push will re-run CI (expect green: steps 1-8 only).
+- Lesson (recorded in AUDIT_GPU_PORT Pass 9 addendum): a .spv-freshness gate must
+  pin the exact toolchain or it false-fails; don't trust a local-only check for a
+  cross-toolchain byte invariant.
+- Next: push the revert + correction (needs user's word); confirm CI green.

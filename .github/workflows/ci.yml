@@ -12,10 +12,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install lavapipe (software Vulkan) + validation layers + glslc
+      - name: Install lavapipe (software Vulkan) + validation layers
         run: |
           sudo apt-get update
-          sudo apt-get install -y mesa-vulkan-drivers libvulkan1 vulkan-validationlayers glslc
+          sudo apt-get install -y mesa-vulkan-drivers libvulkan1 vulkan-validationlayers
 
       - name: Rust toolchain
         run: |
@@ -72,29 +72,11 @@ jobs:
           fi
           echo "staging upload path exercised and validation-clean"
 
-      # BH38: enforce .spv freshness automatically. Every pass has manually
-      # verified "N/N committed .spv == fresh glslc recompile"; this makes that
-      # invariant a gate, not a ritual. Recompile each .comp with the SAME flags
-      # the blobs were built with (glslc --target-env=vulkan1.3 -O) and fail if
-      # any committed .spv differs -- catching a .comp edited without recompiling
-      # the .spv (which include_bytes! would then ship stale).
-      - name: Check .spv freshness (recompile + byte-compare)
-        run: |
-          set -uo pipefail
-          tmp="$(mktemp -d)"
-          fail=0
-          for comp in dssim-vulkan/shaders/*.comp; do
-            if ! glslc --target-env=vulkan1.3 -O "$comp" -o "$tmp/out.spv"; then
-              echo "::error::$comp failed to compile"
-              fail=1
-              continue
-            fi
-            if ! cmp -s "$comp.spv" "$tmp/out.spv"; then
-              echo "::error::$comp is stale: committed $comp.spv != fresh glslc output (recompile it)"
-              fail=1
-            fi
-          done
-          if [ "$fail" -eq 0 ]; then
-            echo "all .spv blobs fresh-match a glslc recompile"
-          fi
-          exit "$fail"
+      # BH38 (attempted, then reverted -- see AUDIT_GPU_PORT.md Pass 9 resolution):
+      # a CI .spv-freshness byte-compare gate was added, but run #16 proved the
+      # premise wrong: SPIR-V is NOT byte-stable across glslc versions. The
+      # committed blobs are built with the pinned Vulkan SDK glslc (1.4.357.0);
+      # apt's glslc is a different version and flagged all 8 "stale" (including
+      # the 7 that fresh-match the SDK). Automating this would require pinning the
+      # exact SDK in CI (heavy/brittle for a low finding). Freshness stays a
+      # per-pass manual check against the SDK glslc that builds the blobs.

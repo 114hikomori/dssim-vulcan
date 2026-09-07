@@ -597,3 +597,20 @@ post-hoc (see approval note above).
 Tier-5 authorization quote: the implementer's checkpoint said "as the user
 authorized" without a verbatim quote (same shape as P5); the user confirmed in the
 auditing session. Standing rule already recorded (quote at push/record time).
+
+### Pass 9 addendum — BH38 REVERTED after CI run #16 (2026-09-07)
+
+The resolution above said BH38 was fixed with a CI `.spv`-freshness byte-compare
+gate. **That gate broke CI run #16**: apt's `glslc` is a different version than
+the pinned Vulkan SDK `glslc` (1.4.357.0) that built the committed blobs, so it
+flagged **all 8** shaders "stale" — including the 7 that fresh-match the SDK
+locally. Root cause: **SPIR-V is not byte-stable across glslc versions**, so a
+CI byte-compare is only valid if CI runs the *exact* SDK compiler. Automating it
+properly means pinning + downloading the full Vulkan SDK in CI (heavy, brittle)
+for a low finding — not worth it.
+
+**Decision: reverted the CI gate** (removed the step + `glslc` from apt). BH38's
+intent stands but is addressed by the existing per-pass manual fresh-match
+against the SDK glslc that actually builds the blobs (verified every pass, incl.
+this one: 8/8). BH36 and BH37 remain fixed (they're code, unaffected). Lesson
+recorded: a freshness gate must pin the exact toolchain or it false-fails.
