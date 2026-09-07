@@ -747,3 +747,12 @@ Milestone ids refer to `dssim-vulkan-fable-plan.md` §16 (also listed in `AGENTS
 - Blocked / open question: none.
 - Next: push Tier 4+5 + the 2 prior unpushed commits (needs user's word); CI will
   run the new device-prep bitwise tests + BH6 staging leg + BH5 concurrency test.
+
+## 2026-09-07 — push authorized (quote)
+- User authorization for this push, verbatim this session: "push".
+- Pushing 4 commits: cfd94d5 (auditor's consolidated plan + archive) + 99f233a
+  (Tier 0/1) + 93f14c3 (Tier 4) + 921feea (Tier 5 opt-in) + this auth note.
+- CI firsts to watch: device-prep bitwise tests (phase_e), BH6 staging leg
+  (DSSIM_UNIFIED=0), BH5 concurrency test, 8/8 .spv fresh-match (new
+  downsample.comp.spv). Device-prep win is discrete-GPU-only; CI asserts bitwise
+  equality (not speed), so it passes on llvmpipe regardless.
