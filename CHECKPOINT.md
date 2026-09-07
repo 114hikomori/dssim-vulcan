@@ -810,3 +810,10 @@ Milestone ids refer to `dssim-vulkan-fable-plan.md` §16 (also listed in `AGENTS
   pin the exact toolchain or it false-fails; don't trust a local-only check for a
   cross-toolchain byte invariant.
 - Next: push the revert + correction (needs user's word); confirm CI green.
+
+## 2026-09-07 — push authorized (quote): revert of BH38 CI gate
+- User authorization for this push, verbatim this session: "Push the revert to
+  restore green".
+- Pushing 8b32391 (BH38 CI-gate revert + audit/checkpoint corrections) + this
+  note. origin/main is currently red (run #16 on the byte-compare gate); this
+  restores green (run #17 = steps 1-8 only, no freshness gate).
