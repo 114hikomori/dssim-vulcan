@@ -784,3 +784,11 @@ Milestone ids refer to `dssim-vulkan-fable-plan.md` §16 (also listed in `AGENTS
 - Blocked / open question: none.
 - Next: push Pass-9 fixes (f1781f6 + this + audit doc) — needs user's word; CI
   will run the new .spv-freshness gate (glslc via apt) + compare_many guard test.
+
+## 2026-09-07 — push authorized (quote)
+- User authorization for this push, verbatim this session: "push".
+- Pushing 4 commits + this note: 52aafc2 (auditor Pass 9) + bfbf326 (auditor
+  Tier-5 auth confirmation) + f1781f6 (BH36/37/38 fixes) + docs commit.
+- CI #16 firsts to watch: the new .spv-freshness gate (glslc via apt — if the
+  runner lacks the package the step fails loudly, then switch to SDK), and
+  phase_e_compare_many_rejects_size_mismatch (BH36 guard).
