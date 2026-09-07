@@ -86,6 +86,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("warning: --gpu requested but this build has no Vulkan support (gpu feature off); using CPU");
     }
     let use_gpu = gpu_requested && cfg!(feature = "gpu");
+    // BH37 (related nit): --gpu-prep only affects the GPU path; if given without
+    // an active --gpu it is silently ignored. Say so rather than let the user
+    // think device-prep is engaged.
+    if gpu_prep.is_some() && !use_gpu {
+        eprintln!("warning: --gpu-prep has no effect without --gpu (ignored)");
+    }
 
     let files = matches.free;
 

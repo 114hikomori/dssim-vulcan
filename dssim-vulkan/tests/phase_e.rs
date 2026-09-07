@@ -541,3 +541,25 @@ fn phase_e_device_prep_split_matches_cpu_prep() {
         );
     }
 }
+
+
+/// BH36: compare_many must reject a mismatched modified with Err BEFORE any GPU
+/// dispatch -- not panic in compare() after wasting a full pyramid build for the
+/// bad modified and discarding the scores already computed.
+#[test]
+fn phase_e_compare_many_rejects_size_mismatch() {
+    let _gpu = gpu_lock();
+    let context = Arc::new(Context::new().expect("context"));
+    let gpu = GpuSsim::new(context).unwrap();
+    let orig = synth_rgba(64, 64, 0x1111_2222);
+    let r = gpu.create_image(&orig).unwrap();
+    let good = synth_rgba(64, 64, 0x3333_4444);
+    let bad = synth_rgba(64, 63, 0x5555_6666); // height differs
+    let err = gpu
+        .compare_many(&r, &[good, bad])
+        .unwrap_err();
+    assert!(
+        matches!(err, dssim_vulkan::Error::InvalidInput(_)),
+        "expected InvalidInput, got {err:?}"
+    );
+}

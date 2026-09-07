@@ -487,7 +487,18 @@ impl GpuSsim {
 
     /// Gray (1-channel) variant: linear-light f32 planes, matching
     /// `GBitmap::to_lab` (the x1.16 branch). One GPU submit for all scales.
+    ///
+    /// BH37: the gray path always uses CPU-side downsampling — [`PrepMode::Device`]
+    /// (Tier 5) is implemented for the interleaved-RGBA path only, so it does not
+    /// apply here. A debug build asserts if you combine `Device` prep with gray
+    /// (rather than silently running the unoptimized CPU path); release falls back
+    /// to CPU prep, which is correct, just not the device-prep fast path.
     pub fn create_image_gray(&self, src: &ImgVec<f32>) -> Result<GpuSsimImage> {
+        debug_assert_eq!(
+            self.prep_mode,
+            PrepMode::Cpu,
+            "PrepMode::Device is RGB-path only; create_image_gray always uses CPU prep"
+        );
         let mut passes: Vec<Pass> = Vec::new();
         // F28: same adaptive granularity as the RGB path.
         let flush_per_scale = src.width() * src.height() >= self.split_min_pixels;
@@ -726,6 +737,30 @@ impl GpuSsim {
         reference: &GpuSsimImage,
         modifieds: &[ImgVec<dssim_core::RGBAPLU>],
     ) -> Result<Vec<f64>> {
+        // BH36: guard up front, like create_image_pair's BH3 check. The modifieds
+        // are RGBAPLU (create_image -> 3-channel pyramids), so the reference must
+        // be 3-channel and every modified must match its scale-0 dims; otherwise
+        // compare() would PANIC on the F29 asserts *after* wasting a full GPU
+        // pyramid build for the mismatched modified, discarding the scores already
+        // computed in the batch. Return Error::InvalidInput before any dispatch.
+        // (Scale-0 dims matching implies all scales match -- the pyramid is
+        // deterministic, same reasoning as create_image_pair.)
+        if reference.channels() != 3 {
+            return Err(Error::InvalidInput(format!(
+                "compare_many: reference is {}-channel but modifieds are RGBAPLU (3-channel)",
+                reference.channels()
+            )));
+        }
+        let (rw, rh) = (reference.width(), reference.height());
+        for (i, m) in modifieds.iter().enumerate() {
+            if m.width() != rw || m.height() != rh {
+                return Err(Error::InvalidInput(format!(
+                    "compare_many: modified[{i}] {}x{} != reference {rw}x{rh}",
+                    m.width(),
+                    m.height()
+                )));
+            }
+        }
         let mut out = Vec::with_capacity(modifieds.len());
         for m in modifieds {
             let mg = self.create_image(m)?;
@@ -761,6 +796,11 @@ impl GpuSsimImage {
 
     pub fn height(&self) -> usize {
         self.scales[0].height
+    }
+
+    /// Channel count of scale 0 (3 for RGB, 1 for gray).
+    pub fn channels(&self) -> usize {
+        self.scales[0].channels
     }
 }
 
