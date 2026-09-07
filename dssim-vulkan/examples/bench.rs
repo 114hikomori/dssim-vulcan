@@ -237,6 +237,40 @@ fn main() {
         );
     }
 
+    // Tier 5: device-side pyramid prep (opt-in) vs the default CPU prep, at the
+    // large sizes where it should win -- it uploads only level-0 RGBA and builds
+    // the rest of the pyramid on-device, cutting per-scale host->VRAM transfer
+    // and the CPU 2x2 downsample. create_ms = single-image pyramid build (lower
+    // is better). Bitwise-equal scores (Mode A), so this is pure transport.
+    let gpu_dev =
+        GpuSsim::with_prep_mode(context.clone(), dssim_vulkan::PrepMode::Device).unwrap();
+    println!("\nTier 5 device-prep vs cpu-prep create_ms (bitwise-equal scores):");
+    println!("{:>12} {:>10} {:>10} {:>7}", "image", "cpu_prep", "dev_prep", "ratio");
+    for &(w, h) in &[(2048usize, 2048usize), (4096, 4096)] {
+        let (a, _) = noise_pair(w, h, 0x5E11_0000 ^ w as u64);
+        let cpu_prep = time_ms(
+            || {
+                let _ = gpu.create_image(&a).unwrap();
+            },
+            1,
+            3,
+        );
+        let dev_prep = time_ms(
+            || {
+                let _ = gpu_dev.create_image(&a).unwrap();
+            },
+            1,
+            3,
+        );
+        println!(
+            "{:>12} {:>10.2} {:>10.2} {:>7.2}",
+            format!("{w}x{h}"),
+            cpu_prep,
+            dev_prep,
+            dev_prep / cpu_prep
+        );
+    }
+
     eprintln!("\nNote: GPU path is the optimized Phase-H shape — create_image writes");
     eprintln!("the pyramid upload straight into mapped staging (no intermediate");
     eprintln!("Vec/memcpy passes), compare runs one batched submit over GPU-resident");

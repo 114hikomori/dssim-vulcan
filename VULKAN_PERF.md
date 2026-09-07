@@ -195,3 +195,26 @@ already 0.42× there); Tier 3 (GPU compute) is explicitly "do NOT start now"
 (GPU-busy ~5%); Tier 5 (H6 GPU downsample) is a standing non-goal needing human
 authorization. No further optimization is warranted without a new product
 decision.
+
+## Tier 5 — device-side pyramid prep (opt-in, Mode A) — measured
+
+`--gpu-prep=device` (default `cpu`) uploads only level-0 RGBA and builds the rest
+of the pyramid on the GPU with a 2x2 box downsample that is a **bitwise-exact**
+transcription of `dssim_core::image::Average4` (`((a+b)+c)+d)*0.25`, `precise`,
+OpFma=0). Mode A parity is proven: `phase_e_device_prep_is_bitwise_equal_to_cpu_prep`
+asserts `dev_prep.to_bits() == cpu_prep.to_bits()` across 8 sizes (odd/floor-drop
++ small/stop-cutoff) and in split mode.
+
+Measured create_ms (RX 6600M, 2 runs, laptop noise):
+
+| size | cpu_prep | device_prep | ratio |
+|---|---|---|---|
+| 2048² | 66–72 ms | 18–19 ms | **0.26–0.28** (~3.6×) |
+| 4096² | 296 ms | 190 ms | **0.64** (~1.6×) |
+
+The win is larger at 2048² because device-prep removes *all* per-scale host work
+(5 CPU downsamples + 5 WC uploads → 1 upload + cheap in-VRAM passes); at 4096² the
+single level-0 upload (268 MB) is itself the transfer floor, capping the gain to
+~1.6×. This is the profiling justification AGENTS.md §8 requires for the
+GPU-downsample non-goal; it ships **opt-in only** (default path unchanged, all
+existing tests still exercise CPU prep).

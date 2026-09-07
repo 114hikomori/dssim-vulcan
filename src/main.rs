@@ -34,6 +34,9 @@ fn usage(argv0: &str) {
        Compares first image against subsequent images, and outputs\n\
        1/SSIM-1 difference for each of them in order (0 = identical).\n\n\
        Images must have identical size, but may have different gamma & depth.\n\
+       \n--gpu uses the experimental Vulkan backend (falls back to CPU).\n\
+       --gpu-prep=device opts into GPU-side pyramid downsample (bitwise-equal,\n\
+       experimental; default is --gpu-prep=cpu).\n\
        \nVersion {} https://kornel.ski/dssim\n", env!("CARGO_PKG_VERSION"));
 }
 
@@ -64,6 +67,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     opts.optopt("o", "", "set output file name", "NAME");
     opts.optflag("h", "help", "print this help menu");
     opts.optflag("", "gpu", "use the experimental Vulkan compute backend (falls back to CPU if unavailable)");
+    opts.optopt("", "gpu-prep", "with --gpu: pyramid prep 'cpu' (default) or 'device' (GPU-side downsample, opt-in)", "cpu|device");
     let matches = opts.parse(args)?;
 
     if matches.opt_present("h") {
@@ -73,6 +77,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let map_output_file_tmp = matches.opt_str("o");
     let map_output_file = map_output_file_tmp.as_ref();
+    let gpu_prep = matches.opt_str("gpu-prep");
     // BH14: --gpu is advertised in help even in gpu-less builds; if the flag is
     // given but the feature is compiled out, say so instead of silently using
     // the CPU path (the user thinks they're testing the GPU backend).
@@ -91,7 +96,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     if use_gpu {
         #[cfg(feature = "gpu")]
-        return run_gpu(map_output_file, &files);
+        return run_gpu(map_output_file, &files, gpu_prep.as_deref());
         #[cfg(not(feature = "gpu"))]
         unreachable!("use_gpu requires the gpu feature");
     }
@@ -156,8 +161,23 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 /// byte-identical — see CHECKPOINT M6). Map writing is CPU-only for now: the
 /// GPU path returns pooled scores, not SsimMaps (Phase G limitation).
 #[cfg(feature = "gpu")]
-fn run_gpu(map_output_file: Option<&String>, files: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+fn run_gpu(
+    map_output_file: Option<&String>,
+    files: &[String],
+    gpu_prep: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
     use imgref::ImgVec;
+    // Tier 5: opt-in device-side pyramid prep. Default (unset or "cpu") keeps the
+    // fully-tested CPU-prep path; "device" opts into the GPU 2x2 downsample
+    // (bitwise-equal, Mode A parity). Anything else is a hard error, not a
+    // silent fall-through.
+    let prep_mode = match gpu_prep {
+        None | Some("cpu") => gpu_backend::PrepMode::Cpu,
+        Some("device") => gpu_backend::PrepMode::Device,
+        Some(other) => {
+            return Err(format!("--gpu-prep must be 'cpu' or 'device', got '{other}'").into())
+        }
+    };
     let context = match gpu_backend::Context::new() {
         Ok(context) => std::sync::Arc::new(context),
         // BH13: the CPU fallback CAN write -o maps, so honor them here. The old
@@ -180,8 +200,17 @@ fn run_gpu(map_output_file: Option<&String>, files: &[String]) -> Result<(), Box
     let device_name = context.device_name().to_owned();
     // BH2: keep a clone of the context so the scope below can call
     // `supports_size` (GpuSsim::new otherwise consumes the Arc).
-    let gpu = gpu_backend::GpuSsim::new(context.clone())?;
+    let gpu = gpu_backend::GpuSsim::with_prep_mode(context.clone(), prep_mode)?;
     eprintln!("dssim: gpu device: {device_name}");
+    // Tier 5: make the active prep mode explicit (like the BH6 upload-path line)
+    // so a "--gpu-prep=device" run is verifiable in logs, not assumed.
+    eprintln!(
+        "dssim: gpu prep: {}",
+        match gpu.prep_mode() {
+            gpu_backend::PrepMode::Cpu => "cpu",
+            gpu_backend::PrepMode::Device => "device",
+        }
+    );
     type GpuErr = Box<dyn std::error::Error + Send + Sync>;
 
     // BH2: set inside the scope when the device limits can't handle the size;

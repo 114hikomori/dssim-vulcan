@@ -1,0 +1,43 @@
+#version 450
+// Tier 5 (opt-in device prep): 2x2 box downsample of interleaved RGBA, an exact
+// transcription of dssim_core::image::Average4 for RGBAPLU -- per component
+// ((a + b) + c) + d) * 0.25 in that left-assoc order. `precise` (NoContraction)
+// makes it BITWISE equal to the CPU's `(a + b + c + d) * 0.25` (Rust's + is
+// left-associative; *0.25 is an exact power-of-two scale, no rounding for the
+// 0..1 linear range). Input is tightly packed (stride == width); the odd
+// trailing row/col is floor-dropped (output = width/2 x height/2), matching the
+// CPU's `top[0..half_width*2]` slicing. The w<8 || h<8 stop is enforced
+// host-side (mirrors Downsample returning None). Off by default (PrepMode::Cpu).
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer Src {
+    vec4 src_data[];   // interleaved RGBA, 4 floats/pixel
+};
+layout(std430, set = 0, binding = 1) writeonly buffer Dst {
+    vec4 dst_data[];   // interleaved RGBA at half resolution
+};
+
+layout(push_constant) uniform PC {
+    uvec4 dims;   // x = input width, y = input height, z/w = 0
+} pc;
+
+void main() {
+    uint w = pc.dims.x;
+    uint h = pc.dims.y;
+    uint ow = w / 2u;
+    uint oh = h / 2u;
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= ow * oh) {
+        return;
+    }
+    uint ox = idx % ow;
+    uint oy = idx / ow;
+    uint ix = 2u * ox;
+    uint iy = 2u * oy;
+    precise vec4 a = src_data[iy * w + ix];
+    precise vec4 b = src_data[iy * w + (ix + 1u)];
+    precise vec4 c = src_data[(iy + 1u) * w + ix];
+    precise vec4 d = src_data[(iy + 1u) * w + (ix + 1u)];
+    precise vec4 sum = ((a + b) + c) + d;
+    dst_data[idx] = sum * 0.25;
+}

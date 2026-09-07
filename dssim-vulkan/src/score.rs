@@ -61,6 +61,22 @@ pub fn pool_scale(map: &[f32], width: usize, height: usize, scale_n: usize) -> f
     1.0 - map.iter().fold(0.0f64, |s, i| s + (avg - f64::from(*i)).abs()) / len
 }
 
+/// Tier 5: how the multi-scale pyramid's per-scale RGBA is produced.
+///
+/// - [`PrepMode::Cpu`] (default): the CPU runs `dssim_core::Downsample` between
+///   scales and uploads each scale's RGBA. This is the original, fully-tested
+///   path and stays the default — the GPU-side downsample is a standing non-goal
+///   (AGENTS.md §8) made opt-in.
+/// - [`PrepMode::Device`]: upload only level-0 RGBA once, then build the rest of
+///   the pyramid on the GPU with a 2x2 box downsample that is a bitwise-exact
+///   transcription of the CPU's `Average4` (Mode A parity contract). Cuts the
+///   host->VRAM transfer and the CPU downsample at large sizes; opt-in only.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum PrepMode {
+    Cpu,
+    Device,
+}
+
 /// A GPU-side analog of `dssim_core::Dssim`: holds the compiled pipelines
 /// once and drives the multi-scale comparison. Reuses the CPU path for
 /// Lab conversion, downsampling, and the score formula.
@@ -71,6 +87,11 @@ pub struct GpuSsim {
     blur: BlurPipelines,
     color: crate::color::ColorPipelines,
     ssim: SsimPipelines,
+    /// Tier 5: the device-side downsample pipeline (only dispatched when
+    /// `prep_mode == Device`, but built once regardless for simplicity).
+    downsample: crate::downsample::DownsamplePipelines,
+    /// Tier 5: CPU-prep (default) vs device-prep (opt-in).
+    prep_mode: PrepMode,
     /// Scale-0 pixel count at/above which `create_image`/`compare` flush per
     /// scale instead of batching all scales into one submit (F28). Defaults to
     /// `SPLIT_SUBMIT_MIN_PIXELS`; a test seam lowers it to exercise the split
@@ -80,10 +101,31 @@ pub struct GpuSsim {
 
 impl GpuSsim {
     pub fn new(context: Arc<Context>) -> Result<Self> {
+        Self::with_prep_mode(context, PrepMode::Cpu)
+    }
+
+    /// Tier 5: build a `GpuSsim` choosing the pyramid-prep mode. `PrepMode::Cpu`
+    /// is the default/`new()` behavior; `PrepMode::Device` opts into the
+    /// GPU-side downsample (bitwise-equal, Mode A parity contract).
+    pub fn with_prep_mode(context: Arc<Context>, prep_mode: PrepMode) -> Result<Self> {
         let blur = BlurPipelines::new(&context)?;
         let color = crate::color::ColorPipelines::new(&context)?;
         let ssim = SsimPipelines::new(&context)?;
-        Ok(Self { context, blur, color, ssim, split_min_pixels: SPLIT_SUBMIT_MIN_PIXELS })
+        let downsample = crate::downsample::DownsamplePipelines::new(&context)?;
+        Ok(Self {
+            context,
+            blur,
+            color,
+            ssim,
+            downsample,
+            prep_mode,
+            split_min_pixels: SPLIT_SUBMIT_MIN_PIXELS,
+        })
+    }
+
+    /// The active pyramid-prep mode.
+    pub fn prep_mode(&self) -> PrepMode {
+        self.prep_mode
     }
 
     /// Test-only: force the split-submit path by lowering the threshold (0 =
@@ -102,11 +144,25 @@ impl GpuSsim {
     pub fn create_image(&self, src: &ImgVec<dssim_core::RGBAPLU>) -> Result<GpuSsimImage> {
         let mut passes: Vec<Pass> = Vec::new();
         let flush_per_scale = src.width() * src.height() >= self.split_min_pixels;
-        let keep = self.push_rgb_scales(src, &mut passes, flush_per_scale)?;
+        let keep = self.push_rgb_scales_mode(src, &mut passes, flush_per_scale)?;
         if !passes.is_empty() {
             dispatch_sequence(&self.context, &passes)?;
         }
         Ok(to_image(keep))
+    }
+
+    /// Dispatch pyramid-prep to the active [`PrepMode`] (Tier 5). Shared by
+    /// `create_image` and `create_image_pair` so both honor the mode.
+    fn push_rgb_scales_mode<'p>(
+        &'p self,
+        src: &ImgVec<dssim_core::RGBAPLU>,
+        passes: &mut Vec<Pass<'p>>,
+        flush_per_scale: bool,
+    ) -> Result<Vec<ScaleKeep>> {
+        match self.prep_mode {
+            PrepMode::Cpu => self.push_rgb_scales(src, passes, flush_per_scale),
+            PrepMode::Device => self.push_rgb_scales_device(src, passes, flush_per_scale),
+        }
     }
 
     /// T11: build both pyramids in ONE submit. Reference and modified are
@@ -144,8 +200,8 @@ impl GpuSsim {
         // are equal here, so one threshold covers both.)
         let pixels = reference.width() * reference.height();
         let flush_per_scale = pixels >= self.split_min_pixels / 2;
-        let keep_a = self.push_rgb_scales(reference, &mut passes, flush_per_scale)?;
-        let keep_b = self.push_rgb_scales(modified, &mut passes, flush_per_scale)?;
+        let keep_a = self.push_rgb_scales_mode(reference, &mut passes, flush_per_scale)?;
+        let keep_b = self.push_rgb_scales_mode(modified, &mut passes, flush_per_scale)?;
         if !passes.is_empty() {
             dispatch_sequence(&self.context, &passes)?;
         }
@@ -277,6 +333,154 @@ impl GpuSsim {
                 passes.clear();
             }
             current = img.downsample();
+        }
+        Ok(keep)
+    }
+
+    /// Upload interleaved RGBA (4 floats/px) for one scale: zero-copy write into
+    /// a host-visible buffer on unified/ReBAR devices, else staging + CopyBuffer.
+    /// `src_bytes` must be exactly `pixels * 16` bytes. Shared by the device-prep
+    /// path (level-0 only); the CPU-prep path inlines the equivalent per scale.
+    fn upload_rgba_interleaved<'p>(
+        &'p self,
+        pixels: usize,
+        src_bytes: &[u8],
+        passes: &mut Vec<Pass<'p>>,
+    ) -> Result<Buffer> {
+        let write_into = |buf: &Buffer| -> Result<()> {
+            crate::transfer::write_mapped_f32_with(buf, pixels * 4, |dst| {
+                let dstb = unsafe {
+                    std::slice::from_raw_parts_mut(dst.as_mut_ptr() as *mut u8, dst.len() * 4)
+                };
+                dstb.copy_from_slice(src_bytes);
+            })
+        };
+        if self.context.is_unified_memory() {
+            let b = self.context.alloc_buffer(
+                "d.rgba",
+                (pixels * 4 * 4) as u64,
+                vk::BufferUsageFlags::STORAGE_BUFFER,
+                gpu_allocator::MemoryLocation::CpuToGpu,
+            )?;
+            write_into(&b)?;
+            Ok(b)
+        } else {
+            let staging = self.context.alloc_buffer(
+                "d.staging",
+                (pixels * 4 * 4) as u64,
+                vk::BufferUsageFlags::TRANSFER_SRC,
+                gpu_allocator::MemoryLocation::CpuToGpu,
+            )?;
+            write_into(&staging)?;
+            let b = self.context.alloc_buffer(
+                "d.rgba",
+                (pixels * 4 * 4) as u64,
+                vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::STORAGE_BUFFER,
+                gpu_allocator::MemoryLocation::GpuOnly,
+            )?;
+            passes.push(Pass::CopyBuffer { src: staging.clone(), dst: b.clone() });
+            Ok(b)
+        }
+    }
+
+    /// Tier 5 (`PrepMode::Device`): upload only level-0 RGBA, then build the rest
+    /// of the pyramid on the GPU with the bitwise-exact 2x2 box downsample. The
+    /// per-scale Lab/blur work is identical to `push_rgb_scales`; only the
+    /// between-scale step changes from "CPU downsample + upload" to "GPU
+    /// downsample pass". Scale-count/cutoff semantics replicate dssim-core
+    /// exactly (one scale per weight; stop when the current scale is below 8px in
+    /// either dim, matching `Downsample` returning None).
+    fn push_rgb_scales_device<'p>(
+        &'p self,
+        src: &ImgVec<dssim_core::RGBAPLU>,
+        passes: &mut Vec<Pass<'p>>,
+        flush_per_scale: bool,
+    ) -> Result<Vec<ScaleKeep>> {
+        const _: () = assert!(std::mem::size_of::<dssim_core::RGBAPLU>() == 16);
+        let mut keep: Vec<ScaleKeep> = Vec::new();
+        let mut w = src.width();
+        let mut h = src.height();
+
+        let (cow, _, _) = src.as_ref().to_contiguous_buf();
+        let px: &[dssim_core::RGBAPLU] = &cow;
+        let src_bytes =
+            unsafe { std::slice::from_raw_parts(px.as_ptr() as *const u8, px.len() * 16) };
+        let mut rgba_buf = self.upload_rgba_interleaved(w * h, src_bytes, passes)?;
+
+        for _scale in 0..DEFAULT_WEIGHTS.len() {
+            let pixels = w * h;
+
+            let img_all = self.context.alloc_buffer(
+                "d.img",
+                (pixels * 3 * 4) as u64,
+                vk::BufferUsageFlags::STORAGE_BUFFER,
+                gpu_allocator::MemoryLocation::GpuOnly,
+            )?;
+            self.color.lab_into(passes, rgba_buf.clone(), img_all.clone(), w, h, 3);
+            let tmp = self.context.alloc_buffer(
+                "d.tmp",
+                (pixels * 4) as u64,
+                vk::BufferUsageFlags::STORAGE_BUFFER,
+                gpu_allocator::MemoryLocation::GpuOnly,
+            )?;
+            for c in 1..3u32 {
+                let off = c * pixels as u32;
+                self.blur.h5_into(passes, img_all.clone(), tmp.clone(), w, h, w, off, 0);
+                self.blur.v5_into(passes, tmp.clone(), img_all.clone(), w, h, off);
+            }
+            let mu_all = self.context.alloc_buffer(
+                "d.mu",
+                (pixels * 3 * 4) as u64,
+                vk::BufferUsageFlags::STORAGE_BUFFER,
+                gpu_allocator::MemoryLocation::GpuOnly,
+            )?;
+            let sq_all = self.context.alloc_buffer(
+                "d.sq",
+                (pixels * 3 * 4) as u64,
+                vk::BufferUsageFlags::STORAGE_BUFFER,
+                gpu_allocator::MemoryLocation::GpuOnly,
+            )?;
+            for c in 0..3u32 {
+                let off = c * pixels as u32;
+                self.blur.h5_into(passes, img_all.clone(), tmp.clone(), w, h, w, off, 0);
+                self.blur.v5_into(passes, tmp.clone(), mu_all.clone(), w, h, off);
+                self.blur.h5_mul_into(passes, img_all.clone(), img_all.clone(), tmp.clone(), w, h, w, off, off, 0);
+                self.blur.v5_into(passes, tmp.clone(), sq_all.clone(), w, h, off);
+            }
+            keep.push(ScaleKeep {
+                width: w,
+                height: h,
+                channels: 3,
+                img: img_all,
+                mu: mu_all,
+                sq: sq_all,
+            });
+
+            // Stop exactly where CPU `downsample()` returns None: current scale
+            // below 8px in either dim, or we've produced all weighted scales.
+            if w < 8 || h < 8 || keep.len() == DEFAULT_WEIGHTS.len() {
+                if flush_per_scale {
+                    dispatch_sequence(&self.context, passes)?;
+                    passes.clear();
+                }
+                break;
+            }
+            let (nw, nh) = (w / 2, h / 2);
+            let next_rgba = self.context.alloc_buffer(
+                "d.rgba_next",
+                (nw * nh * 4 * 4) as u64,
+                vk::BufferUsageFlags::STORAGE_BUFFER,
+                gpu_allocator::MemoryLocation::GpuOnly,
+            )?;
+            self.downsample.downsample_into(passes, rgba_buf.clone(), next_rgba.clone(), w, h);
+            rgba_buf = next_rgba;
+            w = nw;
+            h = nh;
+
+            if flush_per_scale {
+                dispatch_sequence(&self.context, passes)?;
+                passes.clear();
+            }
         }
         Ok(keep)
     }

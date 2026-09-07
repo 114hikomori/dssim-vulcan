@@ -11,6 +11,7 @@
 pub mod blur;
 pub mod color;
 pub mod context;
+pub mod downsample;
 pub mod error;
 pub mod pipeline;
 pub mod score;
@@ -20,9 +21,10 @@ pub mod transfer;
 pub use blur::{blur_gpu, blur_mul_gpu, BlurPipelines};
 pub use color::rgba_to_lab_gpu;
 pub use context::Context;
+pub use downsample::DownsamplePipelines;
 pub use error::{Error, Result};
 pub use pipeline::ComputePipeline;
-pub use score::{to_dssim, GpuSsim, GpuSsimImage};
+pub use score::{to_dssim, GpuSsim, GpuSsimImage, PrepMode};
 pub use ssim::ssim_combine_gpu;
 pub use transfer::Buffer;
 

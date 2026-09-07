@@ -724,3 +724,26 @@ Milestone ids refer to `dssim-vulkan-fable-plan.md` §16 (also listed in `AGENTS
 - Next: push the bug-hunt (11 commits) + this Tier 0/1 work (needs user's word);
   then Phase H is genuinely complete -- no open optimization remains that isn't
   parked-by-measurement or gated-on-a-human-decision.
+
+## 2026-09-07 — Tier 4 + Tier 5 (opt-in) implemented
+- Tier 4 (H23): GpuSsim::compare_many (resident reference vs N modifieds) +
+  bench batch section. Measured 1024^2: GPU per-modified 35.5->24.6ms as N 1->10
+  (reference create amortized), ratio ~0.40-0.42. Test pins compare_many ==
+  individual == CPU. (commit 93f14c3)
+- Tier 5 (H6, opt-in, Mode A): new downsample.comp (2x2 box, bitwise-exact
+  Average4 transcription, precise/OpFma=0) + downsample.rs module + PrepMode
+  {Cpu default, Device} on GpuSsim + with_prep_mode + push_rgb_scales_device
+  (upload level-0 only, GPU pyramid) + CLI --gpu-prep=cpu|device + prep-mode log
+  line. create_image/create_image_pair dispatch via push_rgb_scales_mode.
+  Mode A PROVEN: phase_e_device_prep_is_bitwise_equal_to_cpu_prep (8 sizes incl
+  odd/floor-drop + small/stop, + split) asserts to_bits() equality. Measured
+  create_ms: 2048^2 66->18ms (0.26-0.28, ~3.6x), 4096^2 296->190ms (0.64, ~1.6x).
+  Default path UNCHANGED (all existing tests still CPU-prep); non-goal honored
+  via opt-in + profiling justification (AGENTS.md 8).
+- Verified: full workspace green WITH validation (0 vulkan errors, 15 suites;
+  phase_e now 15 tests), clippy --no-deps -D warnings clean. New .spv compiled
+  with the audited glslc --target-env=vulkan1.3 -O (OpFma=0).
+- Deviated from plan: none. Tier 5 done as the user authorized (opt-in, Mode A).
+- Blocked / open question: none.
+- Next: push Tier 4+5 + the 2 prior unpushed commits (needs user's word); CI will
+  run the new device-prep bitwise tests + BH6 staging leg + BH5 concurrency test.

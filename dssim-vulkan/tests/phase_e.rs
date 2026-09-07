@@ -10,7 +10,7 @@
 //! Identity is locked to exactly 0.0 (mathematical fact).
 
 use dssim_core::{new as cpu_new, Downsample, ToLABBitmap, ToRGBAPLU};
-use dssim_vulkan::{GpuSsim, Context};
+use dssim_vulkan::{GpuSsim, Context, PrepMode};
 use imgref::{Img, ImgVec};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -480,5 +480,64 @@ fn phase_e_compare_many_matches_individual_and_cpu() {
             );
             assert_parity(&format!("compare_many[{i}]"), many[i], cpus[i]);
         }
+    }
+}
+
+
+/// Tier 5 Mode A: `PrepMode::Device` (GPU 2x2 downsample) must produce results
+/// BITWISE equal to `PrepMode::Cpu` (CPU downsample) -- the opt-in is a drop-in,
+/// not an approximation. Includes odd sizes to exercise the floor-drop of the
+/// trailing row/col, and small sizes to exercise the w<8||h<8 stop.
+#[test]
+fn phase_e_device_prep_is_bitwise_equal_to_cpu_prep() {
+    let _gpu = gpu_lock();
+    let cases: Vec<(usize, usize)> =
+        vec![(96, 80), (64, 64), (63, 63), (100, 37), (255, 255), (8, 8), (9, 9), (16, 15)];
+    for (dev_idx, context) in all_devices() {
+        let gpu_cpu = GpuSsim::new(context.clone()).unwrap();
+        let gpu_dev = GpuSsim::with_prep_mode(context.clone(), PrepMode::Device).unwrap();
+        assert_eq!(gpu_cpu.prep_mode(), PrepMode::Cpu);
+        assert_eq!(gpu_dev.prep_mode(), PrepMode::Device);
+        for &(w, h) in &cases {
+            let seed = (w * 31 + h * 17) as u64;
+            let a = synth_rgba(w, h, 0xABCD_0000 ^ seed);
+            let b = synth_rgba(w, h, 0x1234_0000 ^ seed);
+            let (ra, ma) = gpu_cpu.create_image_pair(&a, &b).unwrap();
+            let cpu_prep = gpu_cpu.compare(&ra, &ma).unwrap();
+            let (rd, md) = gpu_dev.create_image_pair(&a, &b).unwrap();
+            let dev_prep = gpu_dev.compare(&rd, &md).unwrap();
+            assert_eq!(
+                dev_prep.to_bits(),
+                cpu_prep.to_bits(),
+                "dev {dev_idx} {w}x{h}: device prep {dev_prep} != cpu prep {cpu_prep} (not bitwise-equal)"
+            );
+            assert_parity(&format!("device-prep {w}x{h}"), dev_prep, cpu_score(&a, &b));
+        }
+    }
+}
+
+/// Tier 5: device prep must also honor the split-submit path (large images) and
+/// stay bitwise-equal to CPU prep there. Forces split via the test seam.
+#[test]
+fn phase_e_device_prep_split_matches_cpu_prep() {
+    let _gpu = gpu_lock();
+    let a = synth_rgba(96, 80, 0x5A5A_0001);
+    let b = synth_rgba(96, 80, 0x3C3C_0002);
+    for (dev_idx, context) in all_devices() {
+        let mut gpu_cpu = GpuSsim::new(context.clone()).unwrap();
+        gpu_cpu.set_split_threshold_for_test(0);
+        let (ra, ma) = gpu_cpu.create_image_pair(&a, &b).unwrap();
+        let cpu_prep = gpu_cpu.compare(&ra, &ma).unwrap();
+
+        let mut gpu_dev = GpuSsim::with_prep_mode(context, PrepMode::Device).unwrap();
+        gpu_dev.set_split_threshold_for_test(0);
+        let (rd, md) = gpu_dev.create_image_pair(&a, &b).unwrap();
+        let dev_prep = gpu_dev.compare(&rd, &md).unwrap();
+
+        assert_eq!(
+            dev_prep.to_bits(),
+            cpu_prep.to_bits(),
+            "dev {dev_idx}: device-prep split {dev_prep} != cpu-prep split {cpu_prep}"
+        );
     }
 }
