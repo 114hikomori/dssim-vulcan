@@ -614,3 +614,20 @@ intent stands but is addressed by the existing per-pass manual fresh-match
 against the SDK glslc that actually builds the blobs (verified every pass, incl.
 this one: 8/8). BH36 and BH37 remain fixed (they're code, unaffected). Lesson
 recorded: a freshness gate must pin the exact toolchain or it false-fails.
+
+---
+
+## Pass 10 — BH36/37/38 dispositions (`f1781f6`..`d3eac13`)
+
+**VERIFIED.** BH36: `compare_many` now guards channels + per-modified dims
+against reference scale-0 and returns `Error::InvalidInput` BEFORE any
+dispatch (exact gap closed), rejection test added. BH37: `debug_assert` on
+`create_image_gray` + `--gpu-prep` without `--gpu` now warns. BH38: **my
+proposed fix was wrong and the revert is right** — the byte-comparison gate
+they faithfully implemented failed CI run #16 by flagging all 8 shaders
+(toolchain skew: apt glslc ≠ pinned SDK glslc; SPIR-V is not byte-stable
+across versions), and they reverted with the lesson documented ("a
+freshness gate must pin the exact toolchain or it false-fails"). CI trail
+confirms: #15 green → #16 red (gate) → #17 green (revert). Workspace green
+(11 suites), test-weakening hunt clean, pushes authorized and quoted.
+Open audit items: NONE.
