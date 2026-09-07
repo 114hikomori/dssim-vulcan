@@ -4,6 +4,21 @@ This tool computes (dis)similarity between two or more PNG &/or JPEG images usin
 
 The value returned is 1/SSIM-1, where 0 means identical image, and >0 (unbounded) is amount of difference. Values are not directly comparable with other tools. [See below](#interpreting-the-values) on interpreting the values.
 
+## About this repository
+
+This is **dssim-vulcan** — a fork of [dssim](https://github.com/kornelski/dssim)
+that ports the DSSIM computation to a **Vulkan compute backend** (the `--gpu`
+flag) without changing the CPU path. Everything above (the algorithm, the values,
+plain CPU usage) still applies; the sections below add the GPU backend and this
+repo's build/test workflow.
+
+Workspace crates:
+
+- `dssim-core` — the CPU algorithm (AGPL; vendored fork of upstream dssim).
+- `dssim-vulkan` — the Vulkan compute backend (`ash` + `gpu-allocator`), the
+  port's kernels and orchestration.
+- `dssim` — the CLI + library that ties them together and exposes `--gpu`.
+
 ## Features
 
 * Improved algorithm
@@ -39,6 +54,16 @@ earlier note that wrongly called this an 8-bit approximation):
 
     dssim --gpu file.png file-modified.png
 
+The GPU backend also has an opt-in device-side pyramid builder:
+
+    dssim --gpu --gpu-prep=device file.png file-modified.png
+
+`--gpu-prep=device` uploads only the full-resolution image and builds the rest of
+the multi-scale pyramid on the GPU (a ~1.6–3.6× faster `create` at large sizes on
+a discrete GPU). It is **bitwise-equal** to the default `--gpu-prep=cpu` (same
+scores), so it's a drop-in; it's opt-in because GPU-side downsampling is otherwise
+a documented non-goal. `--gpu-prep` has no effect without `--gpu`.
+
 It's also usable [as a library](https://docs.rs/dssim).
 
 Please be mindful about color profiles in the images. Different profiles, or lack of support for profiles in other tools, can make images appear different even when the pixels are the same.
@@ -63,12 +88,46 @@ The version is printed when you run `dssim -h`.
 
 ### Build from source
 
-You'll need [Rust 1.63](https://rustup.rs) or later. Clone the repo and run:
+You'll need [Rust 1.90](https://rustup.rs) or later (this repo uses edition 2024).
+The Vulkan backend is on by default (the `gpu` feature); for a CPU-only build use
+`--no-default-features --features threads`. Clone the repo and run:
 
     rustup update
     cargo build --release
 
-Will give you `./target/release/dssim`.
+Will give you `./target/release/dssim`. The compiled shaders (`.spv`) are checked
+in, so you do **not** need a Vulkan SDK to build. You only need `glslc` (from the
+Vulkan SDK) to recompile a `.comp` after editing it:
+
+    glslc --target-env=vulkan1.3 -O dssim-vulkan/shaders/foo.comp -o dssim-vulkan/shaders/foo.comp.spv
+
+## Development
+
+Run the test suite. The GPU tests need a Vulkan device; run them serially (driver
+contention) and in **debug** so the validation layer is active:
+
+    cargo test --workspace -- --test-threads=1
+
+Debug builds enable the Khronos Vulkan validation layer when it's installed and
+fail loudly on any `[vulkan ERROR]`; set `DSSIM_VK_NO_VALIDATION=1` to disable it.
+`cargo test --release` exercises the shipping code paths (validation and
+`debug_assert!`s are off there, but the parity / locked-value checks still run).
+
+Bench CPU vs GPU (release — the numbers are meaningless in debug):
+
+    cargo run -p dssim-vulkan --example bench --release
+
+Environment variables:
+
+- `DSSIM_VK_NO_VALIDATION=1` — disable the validation layer (debug builds).
+- `DSSIM_UNIFIED=0|1` — force the staging (`0`) or zero-copy (`1`) upload path
+  for A/B testing; unset uses device detection.
+- `DSSIM_BENCH_DEVICE=<n>` — pin the bench to candidate GPU `<n>` (e.g. the
+  integrated one); the default picks the discrete GPU.
+
+Project docs: `CHECKPOINT.md` (current state), `VULKAN_PERF.md` (measured perf),
+`VULKAN_PORT_PLAN.md` / `dssim-vulkan-fable-plan.md` (the port plan), and the
+`AUDIT_*.md` files (review passes). `AGENTS.md` governs how the repo is worked on.
 
 ## Accuracy
 
