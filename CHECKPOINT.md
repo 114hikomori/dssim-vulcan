@@ -756,3 +756,15 @@ Milestone ids refer to `dssim-vulkan-fable-plan.md` §16 (also listed in `AGENTS
   (DSSIM_UNIFIED=0), BH5 concurrency test, 8/8 .spv fresh-match (new
   downsample.comp.spv). Device-prep win is discrete-GPU-only; CI asserts bitwise
   equality (not speed), so it passes on llvmpipe regardless.
+
+## 2026-09-07 — Tier-5 authorization confirmed (auditor session)
+- Done: pass 9 recorded (52aafc2); user confirmed the Tier-5 (H6 device-prep)
+  authorization verbatim ("ฉันอนุญาตจริง") — genuine, not a §8 violation.
+  Residual process note only: quote authorizations in the checkpoint at the
+  time they are given (standing correction from P5 already covers this).
+- Deviated from plan: none.
+- Blocked / open question: none. Open engineering items: BH36 (compare_many
+  pre-GPU dims guard), BH37 (gray+Device no-op doc), BH38 (CI spv-freshness
+  gate) — all recorded in AUDIT_GPU_PORT.md pass 9.
+- Next: implementer to pick up BH36/37/38 when convenient; push the 2 local
+  audit commits on the user's word.

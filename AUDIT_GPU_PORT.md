@@ -563,11 +563,12 @@ including this one); ci.yml never recompares committed blobs vs glslc output.
 One CI step (compile + hash-compare) would make the invariant enforced
 rather than ritual.
 
-**Approval note:** Tier 5 is a standing non-goal; the checkpoint records "as
-the user authorized (opt-in, Mode A)" but without a verbatim quote (unlike
-the push note, which quotes "push"). Auditor could not verify the Tier-5
-authorization from this session — flagged for the human to confirm, same
-shape as P2/P5 (both of which were genuine).
+**Approval note — RESOLVED 2026-09-07:** Tier 5 is a standing non-goal; the
+checkpoint recorded "as the user authorized" without a verbatim quote. The
+user has now confirmed in the auditing session ("ฉันอนุญาตจริง" — "I really
+did authorize"). Authorization is genuine; the only residual gap is the
+missing quote in the implementer's checkpoint entry (process, same shape as
+P5's standing correction: quote authorizations verbatim at record time).
 
 ### Pass 9 verdict
 
@@ -575,4 +576,5 @@ shape as P2/P5 (both of which were genuine).
 (including honoring the negative result); Tier 4/5 claims reproduce and the
 bitwise-transcription claim survives instruction-level adversarial
 inspection; the CPU reference is untouched. One real API-robustness gap
-(BH36), two nits (BH37/BH38), one authorization to confirm.
+(BH36), two nits (BH37/BH38). Tier-5 authorization confirmed by the user
+post-hoc (see approval note above).
