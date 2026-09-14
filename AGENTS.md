@@ -22,6 +22,9 @@ CPU-path behavior. Full technical ground truth lives in:
 This file does not restate the algorithm and should not be edited to duplicate it. If a
 technical detail needs updating, update the plan docs; keep this file about process.
 
+**Quick reference — the stack, the exact build/test/bench commands, and the code
+conventions this repo holds to: §11.**
+
 ## 1. Start of every session
 
 1. Read `CHECKPOINT.md` — that's the actual current state, not this file and not memory.
@@ -205,6 +208,50 @@ suggestion.
 copied/adapted/reimplemented, reason) for every non-trivial piece of reused code — see
 `dssim-vulkan-fable-plan.md` §15 for the exact record shape. Don't let "just studying the
 algorithm" quietly become "copied the code" without logging it.
+
+## 11. Stack, commands, and conventions (Level-1 quick reference)
+
+**Stack.** Rust **edition 2024, MSRV 1.90**. `ash` 0.38 + `gpu-allocator` 0.28 driving
+Vulkan 1.3 compute. Three crates: `dssim-core` (CPU algorithm; AGPL; vendored fork),
+`dssim-vulkan` (the backend — kernels + orchestration), `dssim` (CLI + library, exposes
+`--gpu`). Shaders are GLSL compute (`.comp`) precompiled to committed `.spv` blobs (so a
+build needs no Vulkan SDK). `gpu` is a default feature; CPU-only is
+`--no-default-features --features threads`.
+
+**Commands** (repo root; cap parallelism with `-j 4` under memory pressure, §7):
+
+| what | command |
+|---|---|
+| build (debug / release) | `cargo build --workspace` / `cargo build --release --workspace` |
+| test — the correctness gate | `cargo test --workspace -- --test-threads=1` |
+| release test (shipping code paths) | `cargo test --release --workspace -- --test-threads=1` |
+| clippy (must be clean) | `cargo clippy -p dssim-vulkan -p dssim --no-deps --lib --bins --tests --examples -- -D warnings` |
+| bench CPU vs GPU (release only) | `cargo run -p dssim-vulkan --example bench --release` |
+| recompile one shader | `glslc --target-env=vulkan1.3 -O dssim-vulkan/shaders/X.comp -o dssim-vulkan/shaders/X.comp.spv` |
+
+Run tests **serially** (`--test-threads=1`) — GPU/validation contention. Debug builds enable
+the Khronos validation layer when installed; a run must show **0** `[vulkan ERROR]`. CI
+(`.github/workflows/ci.yml`) = clippy + full suite with a validation gate + a forced-staging
+leg (`DSSIM_UNIFIED=0`). Debug-only env knobs: `DSSIM_VK_NO_VALIDATION`, `DSSIM_UNIFIED`,
+`DSSIM_BENCH_DEVICE` (see the README's Development section).
+
+**Conventions** (match these; the cited files are the working examples):
+- **Shaders carry the parity contract.** FP op order is load-bearing: keep `precise`
+  (NoContraction) on transcriptions of CPU `mul_add`/op sequences; a "harmless" reorder or
+  an FMA contraction breaks bitwise / ≤5e-6 parity (see the `precise`/`fma` sites in
+  `shaders/*.comp`). Adding a shader means recompiling its `.spv` **and** adding it to a
+  parity suite.
+- **`*_into` wrapper pattern** (`blur.rs`, `color.rs`, `ssim.rs`): wrappers push a `Pass`
+  into a caller-owned `Vec<Pass>` so a whole pyramid goes out in one `dispatch_sequence`;
+  the host-in/host-out helpers (`blur`, `blur_mul`, `ssim_combine_gpu`) are the
+  test/reference form. Working example: `blur.rs::h5_into`.
+- **Guard rails, not optimism.** Public `Result` APIs validate inputs up front and return
+  `Error::InvalidInput` (never panic mid-batch); per-wrapper buffer-size checks are
+  `debug_assert!`; mapped-I/O bounds are hard `assert!`. Errors flow through
+  `crate::Result` / `Error` (`error.rs`) — no `unwrap()` on fallible GPU calls in the
+  library.
+- **Make claims verifiable.** Log the *effective* runtime choice (validation state, upload
+  path, prep mode) instead of assuming it, so a "verified" claim can be checked in the log.
 
 # Fable family (think / act / prove)
 - Before any non-trivial multi-step task, apply the fable-method loop; for tasks that will
