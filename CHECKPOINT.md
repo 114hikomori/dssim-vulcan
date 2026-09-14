@@ -822,3 +822,8 @@ Milestone ids refer to `dssim-vulkan-fable-plan.md` §16 (also listed in `AGENTS
 - User authorization for this push, verbatim this session: "push".
 - Pushing a632933 (README: document this repo's usage/build/dev) + this note.
   Doc-only change; CI should mirror #17 green (no code/shader touched).
+
+## 2026-09-07 — push authorized (quote): AGENTS.md Level-1 context
+- User authorization for this push, verbatim this session: "push".
+- Pushing 3c7b75b (AGENTS.md §11 stack/commands/conventions + §0 pointer) + this
+  note. Doc-only; CI should mirror #19 green (no code/shader touched).
